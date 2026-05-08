@@ -1,0 +1,51 @@
+
+      <!-- ── Projetos ────────────────────────────────────── -->
+      <section id="projetos" class="view">
+        <div class="doc-cards-row">
+          <article class="card doc-card">
+            <div class="doc-card-icon">📋</div>
+            <h3>TAP</h3>
+            <p>Termo de Abertura do Projeto — defina nome, equipe, empresa, datas e objetivos.</p>
+            <button class="btn-primary doc-open-btn" data-doc="tap" data-view-target="doc-tap">FAÇA O TAP</button>
+          </article>
+          <article class="card doc-card">
+            <div class="doc-card-icon">📝</div>
+            <h3>Projeto de Intervenção</h3>
+            <p>Documento acadêmico completo com introdução, metodologia, cronograma e referências.</p>
+            <button class="btn-primary doc-open-btn" data-doc="pi" data-view-target="doc-pi">PROJETO INTERVEN</button>
+          </article>
+        </div>
+
+        <article class="card mt" id="projects-list-card">
+          <div class="card-head">
+            <h3>Projetos</h3>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Projeto</th>
+                  <th>Disciplina</th>
+                  <th>Equipe / Turma</th>
+                  <th>Integrantes (Papéis Scrum)</th>
+                  <th>Prazo final</th>
+                  <th>Progresso</th>
+                </tr>
+              </thead>
+              <tbody id="projects-table"></tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="card mt">
+          <div class="card-head">
+            <h3>Tarefas do projeto</h3>
+          </div>
+          <div class="filters">
+            <select id="task-project-filter"></select>
+            <input id="task-search" type="text" placeholder="Buscar tarefa..." />
+          </div>
+          <ul id="task-list" class="task-list"></ul>
+        </article>
+
+      </section>

@@ -1,0 +1,39 @@
+
+      <!-- ── Kanban ─────────────────────────────────────── -->
+      <section id="kanban" class="view">
+        <!-- Barra de filtros Kanban -->
+        <div class="kanban-filters">
+          <div id="kanban-project-filter" style="display:flex;align-items:center;gap:0.65rem;">
+            <label style="font-size:0.8rem;font-weight:600;color:var(--text-2);margin:0;">Projeto:</label>
+            <select id="kanban-project-select" style="width:auto;flex:0 1 220px;"></select>
+          </div>
+          <input id="kanban-search" type="text" placeholder="Buscar tarefa..." style="flex:1;max-width:220px;" />
+          <select id="kanban-filter-assignee" style="max-width:160px;">
+            <option value="">Todos os responsáveis</option>
+          </select>
+          <select id="kanban-filter-status" style="max-width:160px;">
+            <option value="">Todos os status</option>
+            <option value="nao_iniciado">Não iniciado</option>
+            <option value="em_progresso">Em progresso</option>
+            <option value="concluido">Concluído</option>
+          </select>
+          <select id="kanban-filter-priority" style="max-width:160px;">
+            <option value="">Todas as prioridades</option>
+            <option value="urgente">Urgente</option>
+            <option value="alta">Alta</option>
+            <option value="normal">Normal</option>
+            <option value="baixa">Baixa</option>
+          </select>
+        </div>
+        <div class="kanban-wrapper">
+          <!-- Sidebar pessoal -->
+          <div class="kanban-personal">
+            <h4>Minhas tarefas</h4>
+            <div id="personal-tasks-list"></div>
+          </div>
+          <!-- Quadro principal -->
+          <div class="kanban-board-area">
+            <div id="kanban-board" class="kanban-board" style="--kanban-cols:3"></div>
+          </div>
+        </div>
+      </section>

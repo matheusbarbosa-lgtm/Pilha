@@ -1,0 +1,19 @@
+services:
+  pilha:
+    build: .
+    image: pilha-app
+    container_name: site-pilha
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      - DB_PATH=/data/campusflow.db
+      - EVAL_DB_PATH=/data/grading.db
+    volumes:
+      - ./data:/data
+      - ./uploads:/app/uploads
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true

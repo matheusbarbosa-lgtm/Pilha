@@ -1,0 +1,64 @@
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script defer src="js/core.js"></script>
+  <script defer src="js/auth.js"></script>
+  <script defer src="js/dashboard.js"></script>
+  <script defer src="js/projects.js"></script>
+  <script defer src="js/kanban.js"></script>
+  <script defer src="js/tasks.js"></script>
+  <script defer src="js/equipes.js"></script>
+  <script defer src="js/chat.js"></script>
+  <script defer src="js/avaliacao.js"></script>
+  <script defer src="js/admin.js"></script>
+  <script defer src="js/profile.js"></script>
+  <script defer src="js/nav.js"></script>
+  <script defer src="js/main.js"></script>
+  <script defer src="js/socket.js"></script>
+  <script>
+  (function() {
+    const canvas = document.getElementById('code-rain');
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const chars = '01アイウエオカキクケコサシスセソタチツテトナニヌネノ{}[]()<>=/\\|;:.,_-+*#@!?%&ABCDEFabcdef0123456789';
+    let cols, drops;
+
+    function resize() {
+      canvas.width  = canvas.offsetWidth;
+      canvas.height = canvas.offsetHeight;
+      cols  = Math.floor(canvas.width / 14);
+      drops = Array.from({length: cols}, () => Math.random() * -canvas.height / 14);
+    }
+
+    function draw() {
+      ctx.fillStyle = 'rgba(7, 20, 51, 0.1)';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (let i = 0; i < cols; i++) {
+        const char = chars[Math.floor(Math.random() * chars.length)];
+        const y = drops[i] * 14;
+
+        // cabeça da coluna — branco brilhante
+        ctx.font = '13px monospace';
+        ctx.fillStyle = 'rgba(255,255,255,0.95)';
+        ctx.fillText(char, i * 14, y);
+
+        // corpo — azul claro
+        ctx.fillStyle = i % 3 === 0
+          ? 'rgba(100,180,255,0.8)'
+          : 'rgba(66,133,244,0.6)';
+        ctx.fillText(chars[Math.floor(Math.random() * chars.length)], i * 14, y - 14);
+
+        if (y > canvas.height && Math.random() > 0.975) {
+          drops[i] = 0;
+        }
+        drops[i] += 0.5;
+      }
+    }
+
+    resize();
+    window.addEventListener('resize', resize);
+    setInterval(draw, 40);
+  })();
+  </script>
+</body>
+</html>

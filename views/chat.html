@@ -1,0 +1,50 @@
+
+      <!-- ── Chat ──────────────────────────────────────────── -->
+      <section id="chat" class="view">
+        <div class="chat-tabs-row">
+          <button class="chat-tab active" data-chat-tab="turma">💬 Turma</button>
+          <button class="chat-tab" data-chat-tab="projeto">🔒 Projeto</button>
+        </div>
+
+        <!-- Tab turma -->
+        <div id="chat-tab-turma" class="chat-tab-panel">
+          <div class="chat-layout">
+            <div class="chat-sidebar">
+              <h4>Minhas turmas</h4>
+              <div id="chat-turma-list"></div>
+            </div>
+            <div class="chat-main">
+              <div id="chat-empty" class="chat-empty">Selecione uma turma para abrir o chat.</div>
+              <div id="chat-area" class="hidden">
+                <div class="chat-header" id="chat-header"></div>
+                <div class="chat-messages" id="chat-messages"></div>
+                <div class="chat-input-row">
+                  <textarea id="chat-input" placeholder="Mensagem..." rows="2"></textarea>
+                  <button class="btn-primary" id="chat-send-btn" type="button">Enviar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab projeto -->
+        <div id="chat-tab-projeto" class="chat-tab-panel hidden">
+          <div class="chat-layout">
+            <div class="chat-sidebar">
+              <h4>Projetos</h4>
+              <div id="chat-project-list"></div>
+            </div>
+            <div class="chat-main">
+              <div id="chat-proj-empty" class="chat-empty">Selecione um projeto para abrir o chat privado.</div>
+              <div id="chat-proj-area" class="hidden">
+                <div class="chat-header" id="chat-proj-header"></div>
+                <div class="chat-messages" id="chat-proj-messages"></div>
+                <div class="chat-input-row">
+                  <textarea id="chat-proj-input" placeholder="Mensagem do projeto..." rows="2"></textarea>
+                  <button class="btn-primary" id="chat-proj-send-btn" type="button">Enviar</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>

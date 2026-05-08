@@ -1,0 +1,18 @@
+
+      <!-- ── Turmas (professor) ────────────────────────────── -->
+      <section id="turmas" class="view">
+        <article class="card" id="turmas-create-card">
+          <div class="card-head"><h3>Nova turma</h3></div>
+          <form id="turma-form" class="auth-form" style="display:grid;grid-template-columns:1fr 1fr 1fr auto;gap:0.75rem;align-items:end;">
+            <label style="margin:0">Curso <input name="curso" placeholder="ex: ADS" required /></label>
+            <label style="margin:0">Período <input name="periodo" placeholder="ex: 3" required /></label>
+            <label style="margin:0">Turma <input name="turma" placeholder="ex: B" required /></label>
+            <button class="btn-primary" type="submit" style="height:38px">+ Criar</button>
+          </form>
+          <small id="turma-form-error" class="login-error"></small>
+        </article>
+        <article class="card mt">
+          <div class="card-head"><h3>Turmas criadas</h3></div>
+          <div id="turmas-list"></div>
+        </article>
+      </section>

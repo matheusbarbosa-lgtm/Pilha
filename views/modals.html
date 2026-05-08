@@ -1,0 +1,365 @@
+
+    </main>
+  </div>
+
+  <!-- ── MODAIS ─────────────────────────────────────────── -->
+
+  <!-- Perfil -->
+  <dialog id="profile-modal">
+    <h3>Meu Perfil</h3>
+    <div class="profile-modal-body">
+      <div class="profile-avatar-section">
+        <div class="profile-avatar-wrap" id="profile-avatar-wrap">
+          <span id="profile-avatar-initials"></span>
+          <img id="profile-avatar-img" class="hidden" alt="Foto de perfil" />
+        </div>
+        <button class="btn-secondary" id="profile-photo-btn" type="button">Alterar foto</button>
+        <input type="file" id="profile-photo-input" accept="image/*" class="hidden" />
+      </div>
+      <div class="profile-info-grid">
+        <div class="profile-info-item profile-info-full">
+          <span class="profile-label">Nome completo</span>
+          <span id="profile-name" class="profile-value-strong"></span>
+        </div>
+        <div class="profile-info-item">
+          <span class="profile-label">Usuário</span>
+          <span id="profile-username" class="profile-value muted"></span>
+        </div>
+        <div class="profile-info-item">
+          <span class="profile-label">E-mail</span>
+          <span id="profile-email" class="profile-value"></span>
+        </div>
+        <div class="profile-info-item">
+          <span class="profile-label">Curso</span>
+          <span id="profile-curso" class="profile-value profile-readonly-chip"></span>
+        </div>
+        <div class="profile-info-item">
+          <span class="profile-label">Turma</span>
+          <span id="profile-turma" class="profile-value profile-readonly-chip"></span>
+        </div>
+        <div class="profile-info-item">
+          <span class="profile-label">Período</span>
+          <span id="profile-periodo" class="profile-value profile-readonly-chip"></span>
+        </div>
+        <div class="profile-info-item profile-info-full">
+          <span class="profile-label">Papel(éis) Scrum</span>
+          <div id="profile-scrum-roles" class="profile-value"></div>
+        </div>
+        <div class="profile-info-item profile-info-full">
+          <span class="profile-label">Sobre mim</span>
+          <textarea id="profile-bio" class="profile-edit-input" rows="3" placeholder="Conte um pouco sobre você, seus interesses, experiências..."></textarea>
+        </div>
+      </div>
+    </div>
+    <small id="profile-error" class="login-error" style="padding:0 1.4rem 0.25rem;display:block;"></small>
+    <small id="profile-success" class="ok-msg" style="padding:0 1.4rem 0.25rem;display:block;"></small>
+    <menu>
+      <button id="logout-btn" class="btn-danger" type="button" style="margin-right:auto">Sair da conta</button>
+      <button id="profile-close-btn" class="btn-secondary">Fechar</button>
+      <button id="profile-extended-btn" class="btn-secondary" type="button">Perfil completo</button>
+      <button id="profile-save-btn" class="btn-primary">Salvar</button>
+    </menu>
+  </dialog>
+
+  <!-- Novo projeto -->
+  <dialog id="project-modal">
+    <h3>Novo projeto</h3>
+    <form method="dialog" id="project-form">
+      <label>Nome do projeto <input name="name" placeholder="ex: TCC — Análise de Dados" required /></label>
+      <label>Descrição <input name="description" placeholder="Descreva o objetivo do projeto" /></label>
+      <label>Disciplina / Matéria <input name="discipline" placeholder="ex: Engenharia de Software" /></label>
+      <label>Equipe / turma <input name="team" placeholder="ex: Turma B · 2025" required /></label>
+      <label>Integrantes (separados por vírgula) <input name="members" placeholder="ex: Ana Silva, Bruno Costa" required /></label>
+      <label>Data de início <input type="date" name="startDate" /></label>
+      <label>Data final <input type="date" name="deadline" required /></label>
+      <menu>
+        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button class="btn-primary" value="default">Salvar projeto</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Nova tarefa -->
+  <dialog id="task-modal">
+    <h3>Nova tarefa</h3>
+    <form method="dialog" id="task-form">
+      <label>Projeto <select name="projectId" id="task-project-select"></select></label>
+      <label>Título <input name="title" placeholder="Descreva a tarefa..." required /></label>
+      <label>Descrição / Requisitos <textarea name="description" placeholder="Detalhe o que precisa ser feito..."></textarea></label>
+      <label>Responsável
+        <select name="assignee" id="task-assignee-select">
+          <option value="Todos">Todos (tarefa geral)</option>
+        </select>
+      </label>
+      <label>Prioridade
+        <select name="priority">
+          <option value="urgente">🔴 Urgente</option>
+          <option value="alta">🟠 Alta</option>
+          <option value="normal" selected>🟡 Normal</option>
+          <option value="baixa">🟢 Baixa</option>
+        </select>
+      </label>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.6rem;">
+        <label>Data de início <input type="date" name="startDate" /></label>
+        <label>Data de vencimento <input type="date" name="dueDate" required /></label>
+      </div>
+      <div id="task-custom-fields"></div>
+      <menu>
+        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button class="btn-primary" value="default">Salvar tarefa</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Editar tarefa (básico) -->
+  <dialog id="edit-task-modal">
+    <h3>Editar tarefa</h3>
+    <form method="dialog" id="edit-task-form">
+      <input type="hidden" name="taskId" />
+      <label>Título <input name="title" required /></label>
+      <label>Responsável <select name="assignee" id="edit-task-assignee-select"></select></label>
+      <label>Data de entrega <input type="date" name="dueDate" required /></label>
+      <label>Urgência
+        <select name="urgency">
+          <option value="low">🟢 Baixa</option>
+          <option value="medium">🟡 Média</option>
+          <option value="high">🔴 Alta</option>
+        </select>
+      </label>
+      <div id="edit-task-custom-fields"></div>
+      <menu>
+        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button class="btn-primary" value="default">Salvar alterações</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Sprint -->
+  <dialog id="sprint-modal">
+    <h3>Nova sprint</h3>
+    <form method="dialog" id="sprint-form">
+      <label>Nome <input name="name" placeholder="ex: Sprint 1 — MVP" required /></label>
+      <label>Objetivo <input name="goal" placeholder="O que será entregue?" required /></label>
+      <label>Data de início <input type="date" name="start" required /></label>
+      <label>Data de fim <input type="date" name="end" required /></label>
+      <menu>
+        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button class="btn-primary" value="default">Criar sprint</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <!-- Campo customizado -->
+  <dialog id="custom-field-modal">
+    <h3>Novo campo customizado</h3>
+    <form method="dialog" id="custom-field-form">
+      <label>Nome do campo <input name="name" placeholder="ex: Dificuldade" required /></label>
+      <label>Tipo
+        <select name="fieldType" id="cf-type-select">
+          <option value="text">Texto</option>
+          <option value="number">Número</option>
+          <option value="select">Seleção (lista)</option>
+          <option value="date">Data</option>
+          <option value="checkbox">Checkbox</option>
+        </select>
+      </label>
+      <label id="cf-options-label" class="hidden">
+        Opções (separadas por vírgula) <input name="options" placeholder="ex: Fácil, Médio, Difícil" />
+      </label>
+      <menu>
+        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button class="btn-primary" value="default">Salvar campo</button>
+      </menu>
+    </form>
+  </dialog>
+
+
+  <!-- Task Detail Modal (rich) -->
+  <dialog id="task-detail-modal">
+    <div class="task-detail-header">
+      <input class="task-detail-title" id="detail-title" type="text" />
+      <span class="urgency-badge" id="detail-urgency-badge">Média</span>
+    </div>
+    <div class="task-detail-body">
+      <!-- Main -->
+      <div class="task-detail-main">
+
+        <!-- Descrição -->
+        <div class="detail-section">
+          <div class="detail-section-label">Descrição / Requisitos</div>
+          <textarea id="detail-description" placeholder="Adicione uma descrição para esta tarefa..."></textarea>
+        </div>
+
+        <!-- Checklist -->
+        <div class="detail-section">
+          <div class="checklist-header-row">
+            <span class="detail-section-label" style="margin:0">Checklists</span>
+            <div class="progress" style="flex:1;max-width:80px;height:5px"><span id="checklist-bar" style="width:0%"></span></div>
+            <span class="checklist-total-label" id="checklist-label">0/0</span>
+          </div>
+          <div id="checklist-groups"></div>
+          <button class="checklist-new-group-btn" id="checklist-add-group-btn" type="button">+ Criar checklist</button>
+        </div>
+
+        <!-- Tags -->
+        <div class="detail-section">
+          <div class="detail-section-label">Tags</div>
+          <div class="tags-display" id="tags-display"></div>
+          <div class="tags-input-row" style="margin-top:0.5rem;">
+            <input type="text" id="tag-new-input" placeholder="#front, #docs..." />
+            <button class="btn-secondary" id="tag-add-btn" type="button">Adicionar</button>
+          </div>
+        </div>
+
+        <!-- Subtarefas -->
+        <div class="detail-section">
+          <div class="detail-section-label">Subtarefas</div>
+          <div id="subtasks-list" class="subtasks-list"></div>
+          <div class="checklist-add">
+            <input type="text" id="subtask-new-input" placeholder="Nova subtarefa..." />
+            <button class="btn-secondary" id="subtask-add-btn" type="button">+ Adicionar</button>
+          </div>
+        </div>
+
+        <!-- Comentários -->
+        <div class="detail-section">
+          <div class="detail-section-label">Comentários</div>
+          <div class="comments-list" id="comments-list"></div>
+          <div class="comment-input-row">
+            <textarea id="comment-new-input" placeholder="Escreva um comentário..."></textarea>
+            <button class="btn-primary" id="comment-send-btn" type="button">Enviar</button>
+          </div>
+        </div>
+
+        <!-- Anexos -->
+        <div class="detail-section">
+          <div class="detail-section-label">Anexos <small style="color:var(--muted);font-weight:400">(máx 300KB por arquivo)</small></div>
+          <div id="attachments-list" class="attachments-list"></div>
+          <label class="btn-secondary attachment-upload-label" style="cursor:pointer;margin-top:.4rem;display:inline-block;">
+            + Anexar arquivo
+            <input type="file" id="attachment-file-input" class="hidden" accept=".pdf,.doc,.docx,.xls,.xlsx,.png,.jpg,.jpeg,.txt" />
+          </label>
+          <small id="attachment-error" class="login-error"></small>
+        </div>
+
+        <!-- Histórico de alterações -->
+        <div class="detail-section">
+          <div class="detail-section-label" style="cursor:pointer;" id="audit-log-toggle">Histórico de alterações ▸</div>
+          <div id="audit-log-list" class="audit-log-list hidden"></div>
+        </div>
+      </div>
+
+      <!-- Side -->
+      <div class="task-detail-side">
+        <div class="side-field">
+          <label>Status</label>
+          <select id="detail-status">
+            <option value="nao_iniciado">⚪ Não iniciado</option>
+            <option value="em_progresso">🔵 Em progresso</option>
+            <option value="concluido">🟢 Concluído</option>
+          </select>
+        </div>
+        <div class="side-field">
+          <label>Prioridade</label>
+          <select id="detail-priority">
+            <option value="urgente">🔴 Urgente</option>
+            <option value="alta">🟠 Alta</option>
+            <option value="normal">🟡 Normal</option>
+            <option value="baixa">🟢 Baixa</option>
+          </select>
+        </div>
+        <div class="side-field">
+          <label>Responsável</label>
+          <select id="detail-assignee"></select>
+        </div>
+        <div class="side-field">
+          <label>Data de início</label>
+          <input type="date" id="detail-start-date" />
+        </div>
+        <div class="side-field">
+          <label>Vencimento</label>
+          <input type="date" id="detail-due-date" />
+        </div>
+        <div class="side-field">
+          <label>Pontos</label>
+          <input type="number" id="detail-points" min="1" max="13" />
+        </div>
+        <div style="display:flex;gap:0.5rem;flex-direction:column;margin-top:0.5rem;">
+          <button class="btn-primary" id="detail-save-btn" type="button">Salvar alterações</button>
+          <button class="btn-secondary" id="detail-close-btn" type="button">Fechar</button>
+        </div>
+      </div>
+    </div>
+    <input type="hidden" id="detail-task-id" />
+    <input type="hidden" id="detail-project-id" />
+  </dialog>
+
+
+  <!-- Modal: Chat de revisão do documento (TAP/PI) -->
+  <dialog id="doc-chat-modal">
+    <div style="display:flex;align-items:center;gap:.75rem;padding:.25rem 0 .75rem;border-bottom:1px solid var(--border);">
+      <h3 style="margin:0;flex:1;" id="doc-chat-title">Chat de Revisão</h3>
+      <button class="btn-secondary" id="doc-chat-close">Fechar</button>
+    </div>
+    <div id="doc-chat-messages" style="flex:1;overflow-y:auto;padding:.75rem 0;display:flex;flex-direction:column;gap:.5rem;min-height:260px;max-height:50dvh;"></div>
+    <div style="border-top:1px solid var(--border);padding-top:.75rem;display:flex;gap:.5rem;">
+      <textarea id="doc-chat-input" placeholder="Mensagem sobre o documento..." rows="2" style="flex:1;resize:none;"></textarea>
+      <button class="btn-primary" id="doc-chat-send" type="button">Enviar</button>
+    </div>
+  </dialog>
+
+  <!-- Popup perfil professor incompleto -->
+  <div id="prof-profile-popup" class="prof-popup-overlay hidden">
+    <div class="prof-popup-card">
+      <div class="prof-popup-icon">⚠️</div>
+      <h3>Olha, muito importante!</h3>
+      <p>Coloque suas competências aqui para que os alunos possam sempre contar com você e saber mais um pouco sobre você.</p>
+      <div class="auth-form" id="prof-profile-form-popup">
+        <label>Sobre você <textarea id="prof-bio-input" placeholder="Fale sobre sua trajetória e experiência..." rows="3"></textarea></label>
+        <label>Graduações / Formações <input id="prof-grad-input" type="text" placeholder="ex: Mestre em Computação pela USP" /></label>
+        <label>Especialidades <input id="prof-spec-input" type="text" placeholder="ex: Engenharia de Software, IA" /></label>
+        <label>Anos de experiência <input id="prof-exp-input" type="number" min="0" max="60" value="0" /></label>
+      </div>
+      <div style="display:flex;gap:0.75rem;margin-top:1rem;justify-content:flex-end;">
+        <button class="btn-secondary" id="prof-popup-skip">Agora não</button>
+        <button class="btn-primary" id="prof-popup-save">Salvar perfil</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: ver perfil de membro da equipe -->
+  <dialog id="member-profile-modal">
+    <div class="member-profile-header">
+      <div class="member-profile-avatar" id="mp-avatar"></div>
+      <div>
+        <h3 id="mp-name"></h3>
+        <small id="mp-role-badge" class="chip"></small>
+      </div>
+      <button class="btn-secondary" id="mp-close-btn" style="margin-left:auto">Fechar</button>
+    </div>
+    <div class="member-profile-body">
+      <div class="mp-section" id="mp-project-row"></div>
+      <div class="mp-section" id="mp-bio-row"></div>
+      <div class="mp-section" id="mp-skills-row"></div>
+      <div class="mp-section" id="mp-grad-row"></div>
+      <div class="mp-section" id="mp-spec-row"></div>
+      <div class="mp-section" id="mp-exp-row"></div>
+    </div>
+  </dialog>
+
+  <!-- Modal: perfil expandido (editar) -->
+  <dialog id="profile-extended-modal">
+    <h3>Meu Perfil Completo</h3>
+    <div class="auth-form" id="profile-ext-form">
+      <label>Sobre você <textarea id="ext-bio" rows="3" placeholder="Conte sobre você..."></textarea></label>
+      <label>Skills / Habilidades (separadas por vírgula) <input id="ext-skills" type="text" placeholder="ex: React, Node.js, Scrum" /></label>
+      <label>Graduações <input id="ext-grad" type="text" placeholder="ex: Bacharelado em Sistemas de Informação" /></label>
+      <label>Especialidade <input id="ext-spec" type="text" placeholder="ex: Desenvolvimento Web" /></label>
+      <label>Anos de experiência <input id="ext-exp" type="number" min="0" /></label>
+    </div>
+    <small id="profile-ext-error" class="login-error"></small>
+    <menu>
+      <button class="btn-secondary" id="profile-ext-close">Fechar</button>
+      <button class="btn-primary" id="profile-ext-save">Salvar</button>
+    </menu>
+  </dialog>

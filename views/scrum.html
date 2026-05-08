@@ -1,0 +1,58 @@
+
+      <!-- ── Scrum ──────────────────────────────────────── -->
+      <section id="scrum" class="view">
+        <article class="card">
+          <h3>Hierarquia Scrum</h3>
+          <div class="scrum-h-section">
+            <h4 class="scrum-h-title">Papéis do Scrum Team</h4>
+            <div class="scrum-h-roles-grid">
+              <div class="scrum-h-card scrum-po">
+                <div class="scrum-h-badge">PO</div>
+                <strong>Product Owner</strong>
+                <p>Define o produto e prioriza o Product Backlog. Responsável por maximizar o valor entregue ao cliente.</p>
+              </div>
+              <div class="scrum-h-card scrum-sm">
+                <div class="scrum-h-badge">SM</div>
+                <strong>Scrum Master</strong>
+                <p>Facilita o processo, garante que as práticas sejam seguidas e remove impedimentos da equipe.</p>
+              </div>
+              <div class="scrum-h-card scrum-dev">
+                <div class="scrum-h-badge">DEV</div>
+                <strong>Development Team</strong>
+                <p>Equipe multidisciplinar e auto-organizada que desenvolve o incremento do produto a cada Sprint.</p>
+              </div>
+            </div>
+          </div>
+          <div class="scrum-h-section">
+            <h4 class="scrum-h-title">Eventos (Cerimônias)</h4>
+            <div class="scrum-h-events">
+              <div class="scrum-event-card"><div class="scrum-event-icon">&#x1F504;</div><div><strong>Sprint</strong><p>Ciclo de desenvolvimento com duração fixa (1–4 semanas) onde um incremento é criado.</p></div></div>
+              <div class="scrum-event-card"><div class="scrum-event-icon">&#x1F4CB;</div><div><strong>Sprint Planning</strong><p>Planejamento do que será feito na Sprint. Define as tarefas do Sprint Backlog.</p></div></div>
+              <div class="scrum-event-card"><div class="scrum-event-icon">&#x2600;&#xFE0F;</div><div><strong>Daily Scrum</strong><p>Reunião diária de 15 minutos para alinhar o progresso e identificar impedimentos.</p></div></div>
+              <div class="scrum-event-card"><div class="scrum-event-icon">&#x1F3AF;</div><div><strong>Sprint Review</strong><p>Demonstração do trabalho concluído ao fim da Sprint para stakeholders e partes interessadas.</p></div></div>
+              <div class="scrum-event-card"><div class="scrum-event-icon">&#x1F50D;</div><div><strong>Sprint Retrospective</strong><p>Reflexão interna da equipe para melhoria contínua do processo e da colaboração.</p></div></div>
+            </div>
+          </div>
+          <div class="scrum-h-section">
+            <h4 class="scrum-h-title">Artefatos</h4>
+            <div class="scrum-h-artifacts">
+              <div class="scrum-artifact-card"><div class="scrum-artifact-icon">&#x1F4DD;</div><strong>Product Backlog</strong><p>Lista ordenada de tudo o que é necessário no produto. Gerenciado e priorizado pelo Product Owner.</p></div>
+              <div class="scrum-artifact-card"><div class="scrum-artifact-icon">&#x26A1;</div><strong>Sprint Backlog</strong><p>Itens selecionados do Product Backlog para a Sprint atual, com plano de como entregá-los.</p></div>
+              <div class="scrum-artifact-card"><div class="scrum-artifact-icon">&#x2705;</div><strong>Incremento</strong><p>A soma de todo trabalho concluído, garantindo valor utilizável ao cliente ao fim de cada Sprint.</p></div>
+            </div>
+          </div>
+        </article>
+
+        <article class="card mt">
+          <div class="card-head"><h3>Time Scrum dos Projetos</h3></div>
+          <div id="scrum-team-display"></div>
+        </article>
+
+        <article class="card mt">
+          <div class="card-head">
+            <h3>Sprints</h3>
+            <button id="open-sprint-modal" class="btn-secondary">+ Nova sprint</button>
+          </div>
+          <div id="sprint-cards" class="sprint-cards"></div>
+        </article>
+      </section>

@@ -1,0 +1,72 @@
+
+      <!-- ── DETALHE DO PROJETO ─────────────────────────── -->
+      <section id="project-detail" class="view">
+        <div class="doc-form-header" style="margin-bottom:1.25rem;">
+          <button class="btn-secondary" id="project-detail-back">← Voltar</button>
+          <h2 id="pd-title" style="flex:1;margin:0;font-size:1.1rem;"></h2>
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1rem;">
+          <article class="card" style="padding:1rem 1.25rem;">
+            <div class="card-head" style="margin-bottom:0.75rem;"><h3 style="font-size:.9rem;">Informações</h3></div>
+            <div id="pd-info" style="font-size:.85rem;display:flex;flex-direction:column;gap:.35rem;color:var(--text);"></div>
+          </article>
+          <article class="card" style="padding:1rem 1.25rem;">
+            <div class="card-head" style="margin-bottom:0.75rem;"><h3 style="font-size:.9rem;">Equipe Scrum</h3></div>
+            <div id="pd-team" style="font-size:.85rem;display:flex;flex-direction:column;gap:.4rem;"></div>
+          </article>
+        </div>
+
+        <article class="card" id="pd-description-card" style="padding:1rem 1.25rem;margin-bottom:1rem;display:none;">
+          <div class="card-head" style="margin-bottom:.5rem;"><h3 style="font-size:.9rem;">Sobre o Projeto</h3></div>
+          <p id="pd-description" style="font-size:.875rem;white-space:pre-wrap;margin:0;color:var(--text);"></p>
+        </article>
+
+        <article class="card" style="padding:1rem 1.25rem;margin-bottom:1rem;">
+          <div class="card-head" style="margin-bottom:0.75rem;">
+            <h3 style="font-size:.9rem;">Tarefas</h3>
+            <div style="display:flex;gap:.5rem;">
+              <button class="btn-secondary btn-sm pd-doc-btn" data-doc="tap">📄 Abrir TAP</button>
+              <button class="btn-secondary btn-sm pd-doc-btn" data-doc="pi">📄 Abrir PI</button>
+            </div>
+          </div>
+          <div id="pd-tasks" style="font-size:.85rem;"></div>
+        </article>
+      </section>
+
+      <!-- ── EQUIPES (admin) ──────────────────────────────── -->
+      <section id="equipes" class="view">
+
+        <!-- Tabs -->
+        <div class="equipes-tabs">
+          <button class="equipes-tab active" data-tab="equipe">👥 Equipe</button>
+          <button class="equipes-tab" data-tab="scrum">🏷️ Papéis Scrum</button>
+        </div>
+
+        <!-- Tab: Equipe -->
+        <div id="equipes-tab-equipe" class="equipes-tab-panel">
+          <!-- Filtros (professor vê todos) -->
+          <div class="card-head" style="margin:1rem 0 0.75rem;" id="equipes-filters-row">
+            <div style="display:flex;gap:0.75rem;align-items:center;flex-wrap:wrap;">
+              <input id="equipes-search" type="text" placeholder="Buscar por nome ou projeto..." style="flex:1;min-width:180px;max-width:280px;" />
+              <select id="equipes-periodo-filter"><option value="">Todos os períodos</option></select>
+              <select id="equipes-turma-filter"><option value="">Todas as turmas</option></select>
+            </div>
+          </div>
+          <article class="card" style="margin-bottom:1rem;">
+            <div class="card-head"><h3>👩‍🏫 Professores</h3><span id="prof-count" class="chip">0</span></div>
+            <div id="equipes-prof-grid" class="equipes-grid"></div>
+          </article>
+          <div id="equipes-aluno-groups"></div>
+        </div>
+
+        <!-- Tab: Papéis Scrum -->
+        <div id="equipes-tab-scrum" class="equipes-tab-panel hidden">
+          <div class="card-head" style="margin:1rem 0 0.75rem;">
+            <h3 style="font-size:0.95rem;color:var(--muted);">Reatribua papéis Scrum por projeto.</h3>
+            <select id="scrum-project-select" style="min-width:200px;"></select>
+          </div>
+          <div id="scrum-kanban" class="scrum-kanban"></div>
+        </div>
+
+      </section>

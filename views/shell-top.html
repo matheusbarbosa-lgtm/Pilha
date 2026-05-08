@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PILHA | Gestão de Projetos Acadêmicos</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=2" />
+  <link rel="icon" type="image/png" href="assets/pilha-logo.png" />
+</head>
+<body>
+
+  <!-- ── TUTORIAL OVERLAY ───────────────────────────────── -->
+  <div id="tutorial-overlay" class="hidden">
+    <div class="tutorial-card">
+      <div class="tutorial-step-num" id="tutorial-step-num">Passo 1 de 5</div>
+      <span class="tutorial-icon" id="tutorial-icon">🎓</span>
+      <h3 id="tutorial-title">Bem-vindo ao PILHA!</h3>
+      <p id="tutorial-desc">O PILHA é a plataforma de gestão de projetos acadêmicos da UNIPAM. Aqui você organiza tarefas, sprints e colabora com seu grupo.</p>
+      <div class="tutorial-progress" id="tutorial-dots"></div>
+      <div class="tutorial-actions">
+        <button class="tutorial-skip" id="tutorial-skip">Pular tutorial</button>
+        <div class="tutorial-next-row">
+          <button class="btn-secondary" id="tutorial-prev" style="display:none">← Anterior</button>
+          <button class="btn-primary" id="tutorial-next">Próximo →</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── AUTH ──────────────────────────────────────────── -->
+  <section id="auth-screen" class="auth-screen">
+
+    <div class="auth-brand">
+      <canvas id="code-rain" style="position:absolute;inset:0;width:100%;height:100%;opacity:0.18;pointer-events:none;z-index:0;"></canvas>
+      <div class="auth-brand-inner">
+        <img class="brand-image" src="assets/pilha-logo.png" alt="Logo PILHA" onerror="this.style.display='none'">
+        <h2>PILHA</h2>
+        <p>Organize seus projetos acadêmicos com metodologias ágeis de forma simples e eficiente.</p>
+        <div class="auth-features">
+          <div class="auth-feature"><span class="auth-feature-dot">✓</span> Scrum &amp; Kanban integrados</div>
+          <div class="auth-feature"><span class="auth-feature-dot">✓</span> Gestão de sprints e entregas</div>
+          <div class="auth-feature"><span class="auth-feature-dot">✓</span> Rastreamento de tarefas em tempo real</div>
+          <div class="auth-feature"><span class="auth-feature-dot">✓</span> Calendário de datas e prazos</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="auth-panel">
+      <article class="auth-card">
+        <div class="auth-card-logo">
+          <img class="brand-image small" src="assets/pilha-logo.png" alt="Logo PILHA" onerror="this.style.display='none'">
+          <span>PILHA</span>
+        </div>
+
+        <!-- Home -->
+        <div id="auth-view-home" class="auth-view">
+          <h1>Bem-vindo a PILHA</h1>
+          <p>Acesse a plataforma de projetos acadêmicos.</p>
+          <div class="auth-actions">
+            <button id="go-login" class="btn-primary" type="button">Entrar na conta</button>
+          </div>
+          <small class="muted" style="margin-top:1rem;display:block;text-align:center;font-size:0.75rem;">Novo aluno? Acesse o link de cadastro enviado pelo seu professor.</small>
+        </div>
+
+        <!-- Registro via link de convite de projeto -->
+        <div id="auth-view-register-invite" class="auth-view hidden">
+          <h1>Criar conta</h1>
+          <div id="register-invite-info" class="turma-info-box"></div>
+          <form id="register-invite-form" class="auth-form">
+            <input type="hidden" id="register-invite-token" name="inviteToken" />
+            <label>Nome completo <input name="name" placeholder="ex: Ana Silva" required /></label>
+            <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" required /></label>
+            <label>Senha <input type="password" name="password" placeholder="mín. 6 caracteres" required minlength="6" /></label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="6" /></label>
+            <button class="btn-primary" type="submit">Criar conta e entrar</button>
+            <small id="register-invite-error" class="login-error"></small>
+          </form>
+          <button class="btn-link" type="button" data-auth-target="home">← Voltar</button>
+        </div>
+
+        <!-- Registro via link de turma (aluno) -->
+        <div id="auth-view-register-turma" class="auth-view hidden">
+          <h1>Criar conta</h1>
+          <div id="register-turma-info" class="turma-info-box"></div>
+          <form id="register-turma-form" class="auth-form">
+            <input type="hidden" id="register-turma-token" name="turmaToken" />
+            <label>Nome completo <input name="name" placeholder="ex: Ana Silva" required /></label>
+            <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" required /></label>
+            <label>Senha <input type="password" name="password" placeholder="mín. 6 caracteres" required minlength="6" /></label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="6" /></label>
+            <button class="btn-primary" type="submit">Criar conta e entrar</button>
+            <small id="register-turma-error" class="login-error"></small>
+          </form>
+          <button class="btn-link" type="button" data-auth-target="home">← Voltar</button>
+        </div>
+
+        <!-- Login -->
+        <div id="auth-view-login" class="auth-view hidden">
+          <h1>Entrar</h1>
+          <p>Informe suas credenciais para acessar.</p>
+          <form id="login-form" class="auth-form">
+            <label>E-mail <input type="text" name="identifier" placeholder="voce@unipam.edu.br" required autocomplete="username" autocapitalize="none" spellcheck="false" /></label>
+            <label>Senha
+              <input type="password" name="password" placeholder="••••••" required id="login-password-input" />
+              <div class="pw-strength-bar" id="login-pw-bar"><span></span></div>
+            </label>
+            <button class="btn-primary" type="submit">Entrar</button>
+            <small id="login-error" class="login-error"></small>
+          </form>
+          <a class="btn-link" id="go-forgot-password" href="#" style="font-size:0.8rem;margin-top:0.25rem;">Esqueci minha senha</a>
+          <button class="btn-link" type="button" data-auth-target="home">← Voltar</button>
+        </div>
+
+        <!-- 2FA OTP -->
+        <div id="auth-view-2fa" class="auth-view hidden">
+          <h1>Verificação em 2 etapas</h1>
+          <p id="2fa-desc">Digite o código enviado para seu e-mail.</p>
+          <form id="otp-form" class="auth-form">
+            <label>Código de 6 dígitos
+              <input name="code" placeholder="000000" maxlength="6" pattern="\d{6}" required
+                     style="font-size:1.4rem;letter-spacing:0.3em;text-align:center;" />
+            </label>
+            <button class="btn-primary" type="submit">Verificar</button>
+            <small id="otp-error" class="login-error"></small>
+          </form>
+          <button class="btn-link" type="button" data-auth-target="login">← Voltar ao login</button>
+        </div>
+
+        <!-- Esqueci minha senha -->
+        <div id="auth-view-forgot" class="auth-view hidden">
+          <h1>Recuperar senha</h1>
+          <p>Informe seu usuário ou e-mail e enviaremos um link de redefinição.</p>
+          <form id="forgot-form" class="auth-form">
+            <label>Usuário ou e-mail <input name="identifier" placeholder="usuario ou email@exemplo.com" required /></label>
+            <button class="btn-primary" type="submit">Enviar link</button>
+            <small id="forgot-msg" class="ok-msg hidden"></small>
+            <small id="forgot-error" class="login-error"></small>
+          </form>
+          <button class="btn-link" type="button" data-auth-target="login">← Voltar</button>
+        </div>
+
+        <!-- Redefinir senha (via token do e-mail) -->
+        <div id="auth-view-reset" class="auth-view hidden">
+          <h1>Nova senha</h1>
+          <p>Crie uma senha forte para sua conta.</p>
+          <form id="reset-form" class="auth-form">
+            <input type="hidden" name="token" id="reset-token-input" />
+            <label>Nova senha <input type="password" name="newPassword" placeholder="Mínimo 6 caracteres" required minlength="6" /></label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="Repita a senha" required minlength="6" /></label>
+            <button class="btn-primary" type="submit">Salvar nova senha</button>
+            <small id="reset-error" class="login-error"></small>
+          </form>
+        </div>
+
+        <!-- Troca de senha obrigatória -->
+        <div id="auth-view-change-password" class="auth-view hidden">
+          <h1>Crie sua senha</h1>
+          <p>Por segurança, defina uma senha pessoal para acessar a plataforma.</p>
+          <form id="change-password-form" class="auth-form">
+            <label>Nova senha <input type="password" name="newPassword" placeholder="Mínimo 6 caracteres" required minlength="6" /></label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="Repita a senha" required minlength="6" /></label>
+            <button class="btn-primary" type="submit">Salvar e entrar</button>
+            <small id="change-password-error" class="login-error"></small>
+          </form>
+        </div>
+
+        <!-- Registro (mantido só para admin usar se necessário) -->
+        <div id="auth-view-register" class="auth-view hidden" style="display:none!important">
+          <h1>Criar conta</h1>
+          <p>Preencha os dados para se cadastrar.</p>
+          <form id="register-form" class="auth-form">
+            <label>Nome completo <input name="name" placeholder="ex: Ana Silva" required /></label>
+            <label>Usuário <input name="username" placeholder="ex: ana.silva" required /></label>
+            <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" /></label>
+            <label>Perfil
+              <select name="role" id="register-role-select" required>
+                <option value="aluno">Aluno</option>
+              </select>
+            </label>
+            <div id="register-aluno-fields">
+              <label>Curso
+                <select name="curso" required>
+                  <option value="">Selecione o curso</option>
+                  <option value="ADS">ADS — Análise e Desenvolvimento de Sistemas</option>
+                  <option value="CC">CC — Ciência da Computação</option>
+                  <option value="SI">SI — Sistemas de Informação</option>
+                  <option value="ENG">Engenharia de Software</option>
+                  <option value="ADM">Administração</option>
+                  <option value="OUTRO">Outro</option>
+                </select>
+              </label>
+              <label>Turma
+                <select name="turma" required>
+                  <option value="">Selecione a turma</option>
+                  <option value="Turma A">Turma A</option>
+                  <option value="Turma B">Turma B</option>
+                  <option value="Turma C">Turma C</option>
+                  <option value="Turma D">Turma D</option>
+                  <option value="Turma E">Turma E</option>
+                </select>
+              </label>
+              <label>Período
+                <select name="periodo" required>
+                  <option value="">Selecione o período</option>
+                  <option value="1º Período">1º Período</option>
+                  <option value="2º Período">2º Período</option>
+                  <option value="3º Período">3º Período</option>
+                  <option value="4º Período">4º Período</option>
+                  <option value="5º Período">5º Período</option>
+                  <option value="6º Período">6º Período</option>
+                </select>
+              </label>
+            </div>
+            <label>Senha <input type="password" name="password" placeholder="mín. 6 caracteres" required /></label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required /></label>
+            <button class="btn-primary" type="submit">Criar conta</button>
+            <small id="register-error" class="login-error"></small>
+            <small id="register-success" class="ok-msg"></small>
+          </form>
+          <button class="btn-link" type="button" data-auth-target="home">← Voltar</button>
+        </div>
+
+        <!-- Onboarding primeiro login (Aluno) -->
+        <div id="auth-view-onboarding" class="auth-view hidden">
+          <h1>Primeiro acesso</h1>
+          <p>Configure seu perfil e <span id="onboarding-mode-label">crie seu grupo</span>.</p>
+          <form id="student-onboarding-form" class="auth-form">
+            <div class="avatar-upload-row">
+              <div class="avatar-upload-circle" id="onboarding-avatar-circle">
+                <span id="onboarding-avatar-initials">?</span>
+                <img id="onboarding-avatar-img" class="hidden" alt="Foto de perfil" />
+              </div>
+              <label class="btn-secondary avatar-upload-label" for="onboarding-photo-input">
+                Foto de perfil
+                <input type="file" id="onboarding-photo-input" accept="image/*" class="hidden" />
+              </label>
+            </div>
+            <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" required /></label>
+            <label>Nova senha <input type="password" name="password" placeholder="mín. 6 caracteres" required /></label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required /></label>
+
+            <div id="onboarding-create-section" class="onboarding-section-box">
+              <span class="onboarding-section-label">Grupo do Projeto</span>
+              <label>Nome do projeto <input name="projectName" placeholder="ex: App de Biblioteca" /></label>
+              <label>Prazo do projeto <input type="date" name="projectDeadline" /></label>
+              <input type="hidden" name="scrumRole" value="Product Owner" />
+              <label>E-mails dos colegas (separados por vírgula)
+                <input name="inviteEmails" placeholder="colega1@unipam.edu.br, colega2@unipam.edu.br" />
+              </label>
+            </div>
+
+            <div id="onboarding-join-section" class="onboarding-section-box hidden">
+              <span class="onboarding-section-label">Entrar no Projeto</span>
+              <div class="join-info-box">
+                Você foi convidado para participar de um projeto. Após completar seu perfil, você entrará automaticamente no grupo.
+              </div>
+            </div>
+
+            <input type="hidden" name="onboardingMode" id="onboarding-mode-input" value="create" />
+            <input type="hidden" name="inviteToken" id="onboarding-invite-token-input" value="" />
+            <button class="btn-primary" type="submit">Concluir e entrar</button>
+            <small id="onboarding-error" class="login-error"></small>
+            <small id="onboarding-success" class="ok-msg"></small>
+          </form>
+        </div>
+
+
+      </article>
+    </div>
+  </section>

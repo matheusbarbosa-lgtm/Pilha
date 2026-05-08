@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PILHA — Criar conta</title>
+  <link rel="icon" href="/assets/pilha-logo.png" type="image/png" />
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      min-height: 100vh;
+      background: #0D0D1A;
+      color: #E8E8F8;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background-image: radial-gradient(ellipse 80% 60% at 50% 0%, rgba(108,99,255,0.12) 0%, transparent 70%);
+    }
+    .card {
+      background: #1E1E3F;
+      border: 1px solid rgba(108,99,255,0.25);
+      border-radius: 16px;
+      padding: 48px 40px;
+      width: 100%;
+      max-width: 460px;
+      box-shadow: 0 8px 48px rgba(108,99,255,0.15);
+    }
+    .logo {
+      display: flex; align-items: center; gap: 10px;
+      margin-bottom: 32px;
+    }
+    .logo img { height: 36px; }
+    .logo span { font-size: 1.4rem; font-weight: 800; color: #E8E8F8; }
+    .badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      background: rgba(0,212,170,0.12); border: 1px solid rgba(0,212,170,0.3);
+      color: #00D4AA; padding: 5px 14px; border-radius: 100px;
+      font-size: 0.82rem; font-weight: 700; margin-bottom: 20px;
+    }
+    h1 { font-size: 1.6rem; font-weight: 800; margin-bottom: 6px; }
+    .subtitle { color: #9999BB; font-size: 0.95rem; margin-bottom: 32px; }
+    .info-box {
+      background: rgba(108,99,255,0.1);
+      border: 1px solid rgba(108,99,255,0.25);
+      border-radius: 10px;
+      padding: 14px 16px;
+      font-size: 0.88rem;
+      color: #9999BB;
+      margin-bottom: 28px;
+      line-height: 1.5;
+    }
+    .info-box strong { color: #E8E8F8; }
+    label { display: block; font-size: 0.88rem; font-weight: 600; color: #9999BB; margin-bottom: 6px; }
+    input {
+      width: 100%; padding: 12px 14px;
+      background: #13132A; border: 1px solid rgba(108,99,255,0.2);
+      border-radius: 8px; color: #E8E8F8; font-size: 0.95rem;
+      outline: none; transition: border-color 0.2s;
+      margin-bottom: 18px;
+    }
+    input:focus { border-color: #6C63FF; }
+    input::placeholder { color: #6666AA; }
+    .btn {
+      width: 100%; padding: 14px;
+      background: #6C63FF; color: #fff;
+      border: none; border-radius: 10px;
+      font-size: 1rem; font-weight: 700; cursor: pointer;
+      transition: all 0.2s; margin-top: 4px;
+    }
+    .btn:hover { background: #5A52D5; transform: translateY(-1px); }
+    .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+    .error {
+      background: rgba(255,85,114,0.1); border: 1px solid rgba(255,85,114,0.3);
+      color: #FF5572; border-radius: 8px; padding: 12px 14px;
+      font-size: 0.88rem; margin-bottom: 18px; display: none;
+    }
+    .success {
+      background: rgba(0,212,170,0.1); border: 1px solid rgba(0,212,170,0.3);
+      color: #00D4AA; border-radius: 8px; padding: 16px;
+      font-size: 0.95rem; text-align: center; display: none;
+    }
+    .footer-link {
+      text-align: center; margin-top: 24px;
+      font-size: 0.88rem; color: #6666AA;
+    }
+    .footer-link a { color: #6C63FF; text-decoration: none; }
+    .footer-link a:hover { text-decoration: underline; }
+    .invalid-box {
+      text-align: center; padding: 32px 0;
+    }
+    .invalid-box .icon { font-size: 3rem; margin-bottom: 16px; }
+    .invalid-box h2 { font-size: 1.2rem; font-weight: 700; margin-bottom: 8px; }
+    .invalid-box p { color: #9999BB; font-size: 0.92rem; margin-bottom: 24px; }
+    .invalid-box a {
+      display: inline-block; padding: 10px 24px;
+      background: #6C63FF; color: #fff; border-radius: 8px;
+      text-decoration: none; font-weight: 600; font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="logo">
+      <img src="/assets/pilha-logo.png" alt="PILHA" onerror="this.style.display='none'" />
+      <span>PILHA</span>
+    </div>
+
+    <div id="form-area">
+      <div class="badge">✦ Convite recebido</div>
+      <h1>Criar sua conta</h1>
+      <p class="subtitle">Você foi convidado para entrar em um projeto no PILHA.</p>
+
+      <div class="info-box" id="invite-info">Carregando informações do convite...</div>
+
+      <div class="error" id="error-msg"></div>
+      <div class="success" id="success-msg">
+        ✓ Conta criada! Entrando na plataforma...
+      </div>
+
+      <form id="cadastro-form">
+        <input type="hidden" id="invite-token" name="inviteToken" />
+        <label for="name">Nome completo</label>
+        <input type="text" id="name" name="name" placeholder="Seu nome" required autocomplete="name" />
+        <label for="email">E-mail</label>
+        <input type="email" id="email" name="email" placeholder="E-mail do convite" required autocomplete="email" />
+        <label for="password">Senha</label>
+        <input type="password" id="password" name="password" placeholder="Crie uma senha" required autocomplete="new-password" />
+        <label for="confirmPassword">Confirmar senha</label>
+        <input type="password" id="confirmPassword" name="confirmPassword" placeholder="Repita a senha" required autocomplete="new-password" />
+        <button type="submit" class="btn" id="submit-btn">Criar conta e entrar no projeto</button>
+      </form>
+    </div>
+
+    <div id="invalid-area" class="invalid-box" style="display:none">
+      <div class="icon">🔗</div>
+      <h2>Link inválido ou expirado</h2>
+      <p>Este link de convite não é válido ou já foi utilizado. Peça ao seu colega que envie um novo convite.</p>
+      <a href="/">Voltar ao início</a>
+    </div>
+
+    <div class="footer-link" id="footer-link">
+      Já tem conta? <a href="/app">Entrar</a>
+    </div>
+  </div>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("invite");
+    const tokenInput = document.getElementById("invite-token");
+    const infoBox = document.getElementById("invite-info");
+    const errorMsg = document.getElementById("error-msg");
+    const successMsg = document.getElementById("success-msg");
+    const form = document.getElementById("cadastro-form");
+    const submitBtn = document.getElementById("submit-btn");
+
+    if (!token) {
+      document.getElementById("form-area").style.display = "none";
+      document.getElementById("footer-link").style.display = "none";
+      document.getElementById("invalid-area").style.display = "block";
+    } else {
+      tokenInput.value = token;
+      // Valida o token e busca info do convite
+      fetch(`/api/invites/info?token=${encodeURIComponent(token)}`)
+        .then(r => r.json())
+        .then(data => {
+          if (data.error) {
+            document.getElementById("form-area").style.display = "none";
+            document.getElementById("footer-link").style.display = "none";
+            document.getElementById("invalid-area").style.display = "block";
+          } else {
+            infoBox.innerHTML = `Você foi convidado para o projeto <strong>${escapeHtml(data.projectName)}</strong>${data.inviterName ? ` por <strong>${escapeHtml(data.inviterName)}</strong>` : ''}. Crie sua conta para entrar.`;
+            // Preenche o e-mail automaticamente
+            if (data.email) {
+              const emailInput = document.getElementById("email");
+              emailInput.value = data.email;
+              emailInput.readOnly = true;
+              emailInput.style.opacity = "0.7";
+            }
+          }
+        })
+        .catch(() => {
+          infoBox.innerHTML = "Você foi convidado para um projeto no <strong>PILHA</strong>. Crie sua conta para entrar.";
+        });
+    }
+
+    function escapeHtml(str) {
+      return String(str || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errorMsg.style.display = "none";
+      submitBtn.disabled = true;
+      submitBtn.textContent = "Criando conta...";
+
+      const fd = new FormData(form);
+      const pw = fd.get("password");
+      const cpw = fd.get("confirmPassword");
+
+      if (pw !== cpw) {
+        errorMsg.textContent = "As senhas não coincidem.";
+        errorMsg.style.display = "block";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Criar conta e entrar no projeto";
+        return;
+      }
+
+      try {
+        const res = await fetch("/api/auth/register-by-invite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            inviteToken: fd.get("inviteToken"),
+            name: fd.get("name").trim(),
+            email: fd.get("email").trim(),
+            password: pw,
+            confirmPassword: cpw
+          })
+        });
+
+        const data = await res.json();
+
+        if (!res.ok) {
+          errorMsg.textContent = data.error || "Erro ao criar conta.";
+          errorMsg.style.display = "block";
+          submitBtn.disabled = false;
+          submitBtn.textContent = "Criar conta e entrar no projeto";
+          return;
+        }
+
+        // Salva o token da sessão se vier no header
+        const sessionToken = res.headers.get("X-Auth-Token");
+        if (sessionToken) {
+          sessionStorage.setItem("pilha_tab_token", sessionToken);
+        }
+
+        form.style.display = "none";
+        successMsg.style.display = "block";
+        setTimeout(() => { window.location.href = "/app"; }, 1500);
+
+      } catch (err) {
+        errorMsg.textContent = "Erro de conexão. Tente novamente.";
+        errorMsg.style.display = "block";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Criar conta e entrar no projeto";
+      }
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+
+      <section id="admincmd" class="view">
+        <div class="grid-2" style="margin-bottom:1rem;">
+          <!-- Criar professor -->
+          <article class="card">
+            <div class="card-head"><h3>Criar conta de professor</h3></div>
+            <form id="create-professor-form" class="auth-form">
+              <label>Nome completo <input name="name" placeholder="ex: Prof. João Silva" required /></label>
+              <label>E-mail <input type="email" name="email" placeholder="ex: prof.joao@unipam.edu.br" required /></label>
+              <label>Senha temporária <input type="password" name="password" placeholder="mín. 6 caracteres" required /></label>
+              <button class="btn-primary" type="submit">Criar professor</button>
+              <small id="create-prof-error" class="login-error"></small>
+              <small id="create-prof-success" class="ok-msg"></small>
+            </form>
+          </article>
+
+          <!-- Console ADM -->
+          <article class="card">
+            <div class="card-head"><h3>Console ADM</h3></div>
+            <p class="template-note">Comandos: <code>/clear alunos</code>, <code>/clear projeto</code>, <code>/help</code></p>
+            <div class="cmd-row">
+              <input id="admin-cmd-input" type="text" placeholder="Digite um comando..." />
+              <button id="admin-cmd-run" class="btn-primary" type="button">Executar</button>
+            </div>
+            <pre id="admin-cmd-output" class="cmd-output">[ADM] Console pronto.</pre>
+          </article>
+        </div>
+      </section>
+
+      <!-- ── Super ADM ──────────────────────────────────── -->
+      <section id="superadm" class="view">
+        <div class="sadm-tabs">
+          <button class="sadm-tab active" data-sadmtab="logs">Acessos</button>
+          <button class="sadm-tab" data-sadmtab="code">Código Fonte</button>
+          <button class="sadm-tab" data-sadmtab="copy">Copiar Código</button>
+          <button class="sadm-tab" data-sadmtab="db">Banco de Dados</button>
+        </div>
+
+        <!-- Painel Acessos (ativo por padrão) -->
+        <div class="sadm-panel" id="sadm-logs-panel" style="display:flex;flex-direction:column;">
+          <div class="sadm-main" style="height:calc(100vh - 220px);">
+            <div class="sadm-bar">
+              <span class="sadm-bar-title">Histórico de acessos</span>
+              <span id="sadm-logs-meta" class="sadm-bar-meta"></span>
+            </div>
+            <div id="sadm-logs-content" class="sadm-table-wrap"></div>
+          </div>
+        </div>
+
+        <!-- Painel Código Fonte -->
+        <div class="sadm-panel hidden" id="sadm-code-panel">
+          <div class="sadm-split">
+            <div class="sadm-sidebar" id="sadm-file-list">
+              <div class="sadm-loading">Carregando...</div>
+            </div>
+            <div class="sadm-main">
+              <div class="sadm-bar">
+                <span id="sadm-file-name" class="sadm-bar-title">Selecione um arquivo</span>
+                <span id="sadm-file-meta" class="sadm-bar-meta"></span>
+                <button id="sadm-copy-btn" class="sadm-copy-btn" type="button" title="Copiar código">Copiar</button>
+              </div>
+              <pre id="sadm-code-content" class="sadm-code"></pre>
+            </div>
+          </div>
+        </div>
+
+        <!-- Painel Copiar Código -->
+        <div class="sadm-panel hidden" id="sadm-copy-panel">
+          <div id="sadm-copy-list" class="sadm-copy-list">
+            <div class="sadm-loading">Carregando arquivos...</div>
+          </div>
+        </div>
+
+        <!-- Painel Banco de Dados -->
+        <div class="sadm-panel hidden" id="sadm-db-panel">
+          <div class="sadm-split">
+            <div class="sadm-sidebar" id="sadm-table-list">
+              <div class="sadm-loading">Carregando...</div>
+            </div>
+            <div class="sadm-main">
+              <div class="sadm-bar">
+                <span id="sadm-table-name" class="sadm-bar-title">Selecione uma tabela</span>
+                <span id="sadm-table-meta" class="sadm-bar-meta"></span>
+              </div>
+              <div id="sadm-table-content" class="sadm-table-wrap"></div>
+            </div>
+          </div>
+        </div>
+      </section>

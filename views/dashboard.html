@@ -1,0 +1,52 @@
+
+      <!-- ── Dashboard ──────────────────────────────────── -->
+      <section id="dashboard" class="view active">
+        <!-- Calendário -->
+        <article class="card calendar-card">
+          <div class="calendar-nav">
+            <button class="calendar-nav-btn" id="cal-prev">‹</button>
+            <h4 id="cal-month-label">março 2026</h4>
+            <button class="calendar-nav-btn" id="cal-next">›</button>
+          </div>
+          <div class="calendar-weekdays">
+            <div class="calendar-weekday">Dom</div>
+            <div class="calendar-weekday">Seg</div>
+            <div class="calendar-weekday">Ter</div>
+            <div class="calendar-weekday">Qua</div>
+            <div class="calendar-weekday">Qui</div>
+            <div class="calendar-weekday">Sex</div>
+            <div class="calendar-weekday">Sáb</div>
+          </div>
+          <div class="calendar-grid" id="calendar-grid"></div>
+        </article>
+
+        <!-- Mini-kanban + Atividades -->
+        <div class="dashboard-row">
+          <article class="card">
+            <div class="card-head">
+              <h3>Tarefas do grupo</h3>
+            </div>
+            <div class="dash-kanban">
+              <div class="dash-col backlog">
+                <div class="dash-col-head">Backlog</div>
+                <div id="dash-col-backlog"></div>
+              </div>
+              <div class="dash-col doing">
+                <div class="dash-col-head">Fazendo</div>
+                <div id="dash-col-doing"></div>
+              </div>
+              <div class="dash-col done">
+                <div class="dash-col-head">Concluído</div>
+                <div id="dash-col-done"></div>
+              </div>
+            </div>
+          </article>
+
+          <article class="card">
+            <div class="card-head">
+              <h3>Atividade recente</h3>
+            </div>
+            <div id="activity-feed" class="activity-feed"></div>
+          </article>
+        </div>
+      </section>

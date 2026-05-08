@@ -1,0 +1,105 @@
+
+      <!-- ── TAP ───────────────────────────────────────── -->
+      <section id="doc-tap" class="view">
+        <div class="doc-form-header">
+          <button class="btn-secondary doc-back-btn" data-back-view="projetos">← Voltar</button>
+          <h2>TAP — Termo de Abertura do Projeto</h2>
+          <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+            <select id="tap-project-select" class="eval-turma-select"></select>
+            <button class="btn-primary" id="tap-save-btn">Salvar</button>
+            <button class="btn-secondary doc-submit-btn" data-doc="tap" id="tap-submit-btn" title="Enviar para aprovação do professor">Enviar para revisão</button>
+            <button class="btn-primary doc-approve-btn hidden" data-doc="tap" id="tap-approve-btn">✓ Aprovar</button>
+            <button class="btn-danger doc-reject-btn hidden" data-doc="tap" id="tap-reject-btn">✗ Devolver</button>
+            <button class="btn-secondary" id="tap-pdf-btn" title="Exportar como PDF" style="display:none;">⬇ PDF</button>
+            <button class="btn-icon doc-chat-btn" data-doc="tap" title="Chat de revisão" style="font-size:1.3rem;background:none;border:none;cursor:pointer;">💬</button>
+          </div>
+        </div>
+        <div id="tap-status-banner" class="doc-status-banner hidden"></div>
+        <article class="card doc-form-card">
+          <div class="doc-section-title">1 - TAP – TERMO ABERTURA DO PROJETO</div>
+          <div class="doc-item"><label class="doc-label">1.1 Nome do projeto</label><textarea class="doc-field large" id="tap-1-1" rows="2"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.2 Equipe do projeto <small>(ordem alfabética)</small></label>
+            <input class="doc-field" id="tap-1-2-a" type="text" placeholder="Membro 1" />
+            <input class="doc-field" id="tap-1-2-b" type="text" placeholder="Membro 2" />
+            <input class="doc-field" id="tap-1-2-c" type="text" placeholder="Membro 3" />
+            <input class="doc-field" id="tap-1-2-d" type="text" placeholder="Membro 4" />
+          </div>
+          <div class="doc-item"><label class="doc-label">1.3 Empresa do projeto</label><textarea class="doc-field" id="tap-1-3" rows="2"></textarea><p class="doc-obs">Caso o projeto não for desenvolvido para uma empresa deverá ter um profissional da área escolhida para validar as informações.</p></div>
+          <div class="doc-item"><label class="doc-label">1.4 Previsão do projeto</label>
+            <div class="doc-dates-row">
+              <label>Data de início <input class="doc-field-date" id="tap-1-4-inicio" type="date" /></label>
+              <label>Data de término <input class="doc-field-date" id="tap-1-4-fim" type="date" /></label>
+            </div>
+          </div>
+          <div class="doc-item"><label class="doc-label">1.5 Descrição da Oportunidade / Problema a ser resolvido</label><textarea class="doc-field xlarge" id="tap-1-5" rows="5"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.6 Objetivo do projeto</label><textarea class="doc-field xlarge" id="tap-1-6" rows="5"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.7 Descrição resumida do projeto/Produto</label><textarea class="doc-field xlarge" id="tap-1-7" rows="5"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.8 Produto Esperado</label><textarea class="doc-field xlarge" id="tap-1-8" rows="5"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.9 Por qual motivo a equipe escolheu esse projeto?</label><textarea class="doc-field xlarge" id="tap-1-9" rows="5"></textarea></div>
+        </article>
+      </section>
+
+      <!-- ── Projeto de Intervenção ──────────────────────── -->
+      <section id="doc-pi" class="view">
+        <div class="doc-form-header">
+          <button class="btn-secondary doc-back-btn" data-back-view="projetos">← Voltar</button>
+          <h2>Projeto de Intervenção</h2>
+          <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;">
+            <select id="pi-project-select" class="eval-turma-select"></select>
+            <button class="btn-primary" id="pi-save-btn">Salvar</button>
+            <button class="btn-secondary doc-submit-btn" data-doc="pi" id="pi-submit-btn">Enviar para revisão</button>
+            <button class="btn-primary doc-approve-btn hidden" data-doc="pi" id="pi-approve-btn">✓ Aprovar</button>
+            <button class="btn-danger doc-reject-btn hidden" data-doc="pi" id="pi-reject-btn">✗ Devolver</button>
+            <button class="btn-secondary" id="pi-pdf-btn" title="Exportar como PDF" style="display:none;">⬇ PDF</button>
+            <button class="btn-icon doc-chat-btn" data-doc="pi" title="Chat de revisão" style="font-size:1.3rem;background:none;border:none;cursor:pointer;">💬</button>
+          </div>
+        </div>
+        <div id="pi-status-banner" class="doc-status-banner hidden"></div>
+        <article class="card doc-form-card">
+          <div class="doc-section-title">Identificação</div>
+          <div class="doc-item"><label class="doc-label">Instituição</label><input class="doc-field" id="pi-instituicao" type="text" value="CENTRO UNIVERSITÁRIO DE PATOS DE MINAS" /></div>
+          <div class="doc-item"><label class="doc-label">Curso</label><input class="doc-field" id="pi-curso" type="text" /></div>
+          <div class="doc-item"><label class="doc-label">Disciplina</label><input class="doc-field" id="pi-disciplina" type="text" /></div>
+          <div class="doc-item"><label class="doc-label">Professor(a)</label><input class="doc-field" id="pi-professor" type="text" /></div>
+          <div class="doc-item"><label class="doc-label">Autores / Componentes do grupo</label>
+            <input class="doc-field" id="pi-autor-a" type="text" placeholder="Nome completo 1" />
+            <input class="doc-field" id="pi-autor-b" type="text" placeholder="Nome completo 2" />
+            <input class="doc-field" id="pi-autor-c" type="text" placeholder="Nome completo 3" />
+            <input class="doc-field" id="pi-autor-d" type="text" placeholder="Nome completo 4" />
+          </div>
+          <div class="doc-item"><label class="doc-label">Título do projeto</label><input class="doc-field" id="pi-titulo" type="text" /></div>
+          <div class="doc-item"><label class="doc-label">Subtítulo (quando houver)</label><input class="doc-field" id="pi-subtitulo" type="text" /></div>
+
+          <div class="doc-section-title">1 INTRODUÇÃO</div>
+          <div class="doc-item"><label class="doc-label">Contextualização do tema, diagnóstico e comunidade envolvida</label><textarea class="doc-field xlarge" id="pi-introducao" rows="6"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.1 Formulação do problema</label><textarea class="doc-field xlarge" id="pi-problema" rows="4"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.2 Justificativa</label><textarea class="doc-field xlarge" id="pi-justificativa" rows="4"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.3.1 Objetivo geral</label><textarea class="doc-field xlarge" id="pi-obj-geral" rows="3"></textarea></div>
+          <div class="doc-item"><label class="doc-label">1.3.2 Objetivos específicos</label><textarea class="doc-field xlarge" id="pi-obj-especificos" rows="4"></textarea></div>
+
+          <div class="doc-section-title">2 REFERENCIAL TEÓRICO</div>
+          <div class="doc-item"><textarea class="doc-field xlarge" id="pi-referencial" rows="6"></textarea></div>
+
+          <div class="doc-section-title">3 METODOLOGIA</div>
+          <div class="doc-item"><textarea class="doc-field xlarge" id="pi-metodologia" rows="6"></textarea></div>
+
+          <div class="doc-section-title">4 CRONOGRAMA</div>
+          <div class="doc-item">
+            <table class="pi-cronograma-table">
+              <thead><tr><th>Atividade</th><th>Fev.</th><th>Mar.</th><th>Abr.</th><th>Mai.</th><th>Jun.</th><th>Jul.</th></tr></thead>
+              <tbody id="pi-cronograma-tbody">
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+                <tr><td><input class="doc-field-inline" type="text" placeholder="Atividade..." /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td><td><input type="checkbox" /></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <div class="doc-section-title">REFERÊNCIAS</div>
+          <div class="doc-item"><textarea class="doc-field xlarge" id="pi-referencias" rows="6"></textarea></div>
+        </article>
+      </section>
