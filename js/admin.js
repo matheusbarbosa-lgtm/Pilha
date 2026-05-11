@@ -30,6 +30,8 @@ if (adminCmdRun && adminCmdInput && adminCmdOutput) {
 }
 
 // ── Admin: Create Professor ────────────────────────────────
+attachPwStrengthUI("pw-admin-prof", "pwbar-admin-prof", "pwcrit-admin-prof");
+
 document.querySelector("#create-professor-form")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const data = new FormData(e.target);
@@ -42,6 +44,8 @@ document.querySelector("#create-professor-form")?.addEventListener("submit", asy
   const okEl = document.querySelector("#create-prof-success");
   if (errEl) errEl.textContent = "";
   if (okEl) okEl.textContent = "";
+  const _pwErr = validatePasswordStrength(payload.password);
+  if (_pwErr) { if (errEl) errEl.textContent = _pwErr; return; }
   try {
     await apiFetch("/api/admin/professor", { method: "POST", body: JSON.stringify(payload) });
     if (okEl) okEl.textContent = `Professor ${payload.name} criado com sucesso.`;

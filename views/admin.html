@@ -7,7 +7,17 @@
             <form id="create-professor-form" class="auth-form">
               <label>Nome completo <input name="name" placeholder="ex: Prof. João Silva" required /></label>
               <label>E-mail <input type="email" name="email" placeholder="ex: prof.joao@unipam.edu.br" required /></label>
-              <label>Senha temporária <input type="password" id="pw-admin-prof" name="password" placeholder="mín. 8 caracteres" required minlength="8" /></label>
+              <label>Senha temporária
+                <input type="password" id="pw-admin-prof" name="password" placeholder="mín. 8 caracteres" required minlength="8" />
+                <div class="pw-strength-bar" id="pwbar-admin-prof"><span></span></div>
+                <ul class="pw-criteria-list" id="pwcrit-admin-prof">
+                  <li data-crit="length">8 caracteres mínimos</li>
+                  <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                  <li data-crit="lower">Letra minúscula (a-z)</li>
+                  <li data-crit="number">Número (0-9)</li>
+                  <li data-crit="special">Caractere especial (!@#$%...)</li>
+                </ul>
+              </label>
               <button class="btn-primary" type="submit">Criar professor</button>
               <small id="create-prof-error" class="login-error"></small>
               <small id="create-prof-success" class="ok-msg"></small>
