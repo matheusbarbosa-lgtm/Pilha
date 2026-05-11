@@ -87,6 +87,17 @@
     }
     .footer-link a { color: #6C63FF; text-decoration: none; }
     .footer-link a:hover { text-decoration: underline; }
+    .pw-strength-bar { height:4px; border-radius:2px; background:#2A2A4A; margin-top:4px; margin-bottom:12px; overflow:hidden; }
+    .pw-strength-bar span { display:block; height:100%; width:0; border-radius:2px; transition:width .3s,background .3s; }
+    .pw-strength-bar.weak span   { background:#e53e3e; width:25%; }
+    .pw-strength-bar.fair span   { background:#dd6b20; width:50%; }
+    .pw-strength-bar.good span   { background:#d69e2e; width:75%; }
+    .pw-strength-bar.strong span { background:#38a169; width:100%; }
+    .pw-criteria-list { list-style:none; padding:0; margin:0 0 14px; }
+    .pw-criteria-list li { font-size:.76rem; color:#6666AA; padding:1px 0 1px 1.4em; position:relative; transition:color .2s; }
+    .pw-criteria-list li::before { content:"○"; position:absolute; left:0; font-size:.8rem; }
+    .pw-criteria-list li.met { color:#38a169; }
+    .pw-criteria-list li.met::before { content:"✓"; }
     .invalid-box {
       text-align: center; padding: 32px 0;
     }
@@ -126,9 +137,17 @@
         <label for="email">E-mail</label>
         <input type="email" id="email" name="email" placeholder="E-mail do convite" required autocomplete="email" />
         <label for="password">Senha</label>
-        <input type="password" id="password" name="password" placeholder="Crie uma senha" required autocomplete="new-password" />
+        <input type="password" id="password" name="password" placeholder="mín. 8 caracteres" required minlength="8" autocomplete="new-password" />
+        <div class="pw-strength-bar" id="cad-pwbar"><span></span></div>
+        <ul class="pw-criteria-list" id="cad-pwcrit">
+          <li data-crit="length">8 caracteres mínimos</li>
+          <li data-crit="upper">Letra maiúscula (A-Z)</li>
+          <li data-crit="lower">Letra minúscula (a-z)</li>
+          <li data-crit="number">Número (0-9)</li>
+          <li data-crit="special">Caractere especial (!@#$%...)</li>
+        </ul>
         <label for="confirmPassword">Confirmar senha</label>
-        <input type="password" id="confirmPassword" name="confirmPassword" placeholder="Repita a senha" required autocomplete="new-password" />
+        <input type="password" id="confirmPassword" name="confirmPassword" placeholder="Repita a senha" required minlength="8" autocomplete="new-password" />
         <button type="submit" class="btn" id="submit-btn">Criar conta e entrar no projeto</button>
       </form>
     </div>
@@ -146,6 +165,41 @@
   </div>
 
   <script>
+    // ── Política de senha forte (espelha backend) ─────────
+    function validatePasswordStrength(pw) {
+      const s = String(pw || "");
+      if (s.length < 8)            return "Senha deve ter pelo menos 8 caracteres";
+      if (!/[A-Z]/.test(s))        return "Senha deve conter pelo menos uma letra maiúscula";
+      if (!/[a-z]/.test(s))        return "Senha deve conter pelo menos uma letra minúscula";
+      if (!/[0-9]/.test(s))        return "Senha deve conter pelo menos um número";
+      if (!/[^A-Za-z0-9]/.test(s)) return "Senha deve conter pelo menos um caractere especial (!@#$%...)";
+      return null;
+    }
+    function pwStrengthLevel(pw) {
+      if (!pw || pw.length < 8) return "weak";
+      const meets = [/[A-Z]/.test(pw), /[a-z]/.test(pw), /[0-9]/.test(pw), /[^A-Za-z0-9]/.test(pw)].filter(Boolean).length;
+      if (meets === 4 && pw.length >= 12) return "strong";
+      if (meets >= 3) return "good";
+      if (meets >= 2) return "fair";
+      return "weak";
+    }
+    const _checks = {
+      length:  pw => pw.length >= 8,
+      upper:   pw => /[A-Z]/.test(pw),
+      lower:   pw => /[a-z]/.test(pw),
+      number:  pw => /[0-9]/.test(pw),
+      special: pw => /[^A-Za-z0-9]/.test(pw),
+    };
+    const cadPwBar  = document.getElementById("cad-pwbar");
+    const cadPwCrit = document.getElementById("cad-pwcrit");
+    document.getElementById("password").addEventListener("input", function () {
+      const pw = this.value;
+      if (cadPwBar)  cadPwBar.className = `pw-strength-bar ${pw ? pwStrengthLevel(pw) : ""}`;
+      if (cadPwCrit) cadPwCrit.querySelectorAll("[data-crit]").forEach(li => {
+        li.classList.toggle("met", _checks[li.dataset.crit]?.(pw) ?? false);
+      });
+    });
+
     const params = new URLSearchParams(window.location.search);
     const token = params.get("invite");
     const tokenInput = document.getElementById("invite-token");
@@ -201,6 +255,14 @@
 
       if (pw !== cpw) {
         errorMsg.textContent = "As senhas não coincidem.";
+        errorMsg.style.display = "block";
+        submitBtn.disabled = false;
+        submitBtn.textContent = "Criar conta e entrar no projeto";
+        return;
+      }
+      const pwErr = validatePasswordStrength(pw);
+      if (pwErr) {
+        errorMsg.textContent = pwErr;
         errorMsg.style.display = "block";
         submitBtn.disabled = false;
         submitBtn.textContent = "Criar conta e entrar no projeto";

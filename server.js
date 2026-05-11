@@ -60,6 +60,17 @@ function sanitizeUsername(str) {
 function isValidEmail(value) {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value || "").trim());
 }
+// Returns null if password meets the strong policy, or an error string if it doesn't.
+// Policy: ≥8 chars, uppercase, lowercase, digit, special character.
+function validatePasswordStrength(password) {
+  const pw = String(password || "");
+  if (pw.length < 8)            return "Senha deve ter pelo menos 8 caracteres";
+  if (!/[A-Z]/.test(pw))        return "Senha deve conter pelo menos uma letra maiúscula";
+  if (!/[a-z]/.test(pw))        return "Senha deve conter pelo menos uma letra minúscula";
+  if (!/[0-9]/.test(pw))        return "Senha deve conter pelo menos um número";
+  if (!/[^A-Za-z0-9]/.test(pw)) return "Senha deve conter pelo menos um caractere especial (!@#$%...)";
+  return null;
+}
 function readCookieValue(cookieHeader, cookieName) {
   const prefix = `${cookieName}=`;
   const match = String(cookieHeader || "")
@@ -429,7 +440,8 @@ async function createApp(dbOverride, evalDbOverride) {
 
     if (!cleanUsername || !cleanName || !password) return res.status(400).json({ error: "Nome, usuário e senha são obrigatórios" });
     if (!["aluno", "professor"].includes(cleanRole)) return res.status(400).json({ error: "Perfil inválido" });
-    if (String(password).length < 6) return res.status(400).json({ error: "Senha deve ter pelo menos 6 caracteres" });
+    const _pwErrRegister = validatePasswordStrength(password);
+    if (_pwErrRegister) return res.status(400).json({ error: _pwErrRegister });
 
     if (await db.get("SELECT id FROM users WHERE username = ?", [cleanUsername])) {
       return res.status(409).json({ error: "Usuário já existe" });
@@ -486,8 +498,9 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.post("/api/auth/reset-password", async (req, res) => {
     const { token, newPassword } = req.body || {};
-    if (!token || !newPassword || String(newPassword).length < 6)
-      return res.status(400).json({ error: "Token e nova senha (mín. 6 caracteres) são obrigatórios" });
+    const _pwErrReset = validatePasswordStrength(newPassword);
+    if (!token || !newPassword) return res.status(400).json({ error: "Token e nova senha são obrigatórios" });
+    if (_pwErrReset) return res.status(400).json({ error: _pwErrReset });
     const record = await db.get(
       "SELECT * FROM password_reset_tokens WHERE token = ? AND used = 0 AND expires_at > datetime('now')",
       [token]
@@ -552,8 +565,9 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.post("/api/auth/change-password", authRequired, async (req, res) => {
     const { newPassword } = req.body || {};
-    if (!newPassword || String(newPassword).length < 6)
-      return res.status(400).json({ error: "A senha deve ter pelo menos 6 caracteres" });
+    if (!newPassword) return res.status(400).json({ error: "Nova senha é obrigatória" });
+    const _pwErrChange = validatePasswordStrength(newPassword);
+    if (_pwErrChange) return res.status(400).json({ error: _pwErrChange });
     const hash = bcrypt.hashSync(String(newPassword), 10);
     await db.run("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", [hash, req.user.id]);
     return res.json({ ok: true });
@@ -579,7 +593,8 @@ async function createApp(dbOverride, evalDbOverride) {
 
     if (!cleanEmail || !cleanPassword || !cleanConfirm) return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
     if (cleanPassword !== cleanConfirm) return res.status(400).json({ error: "As senhas não coincidem" });
-    if (cleanPassword.length < 6) return res.status(400).json({ error: "Senha deve ter pelo menos 6 caracteres" });
+    const _pwErrOnboarding = validatePasswordStrength(cleanPassword);
+    if (_pwErrOnboarding) return res.status(400).json({ error: _pwErrOnboarding });
 
     if (await db.get("SELECT id FROM users WHERE email = ? AND id <> ?", [cleanEmail, req.user.id])) {
       return res.status(409).json({ error: "E-mail já está em uso" });
@@ -1555,8 +1570,8 @@ async function createApp(dbOverride, evalDbOverride) {
     const { turmaToken, name, email, password } = req.body || {};
     if (!turmaToken || !name || !email || !password)
       return res.status(400).json({ error: "Todos os campos são obrigatórios" });
-    if (String(password).length < 6)
-      return res.status(400).json({ error: "Senha deve ter pelo menos 6 caracteres" });
+    const _pwErrTurma = validatePasswordStrength(password);
+    if (_pwErrTurma) return res.status(400).json({ error: _pwErrTurma });
 
     const turmaRow = await db.get("SELECT * FROM turmas WHERE invite_token = ?", [turmaToken]);
     if (!turmaRow) return res.status(404).json({ error: "Link de turma inválido" });
@@ -1586,8 +1601,8 @@ async function createApp(dbOverride, evalDbOverride) {
       return res.status(400).json({ error: "Todos os campos são obrigatórios" });
     if (String(password) !== String(confirmPassword || ""))
       return res.status(400).json({ error: "As senhas não coincidem" });
-    if (String(password).length < 6)
-      return res.status(400).json({ error: "Senha deve ter pelo menos 6 caracteres" });
+    const _pwErrInvite = validatePasswordStrength(password);
+    if (_pwErrInvite) return res.status(400).json({ error: _pwErrInvite });
 
     const invite = await db.get("SELECT * FROM project_invites WHERE invite_token = ? AND status = 'pending'", [inviteToken]);
     if (!invite) return res.status(404).json({ error: "Convite inválido ou já utilizado" });
@@ -1751,7 +1766,8 @@ async function createApp(dbOverride, evalDbOverride) {
     const cleanPassword = String(password || "");
     if (!cleanEmail || !cleanName || !cleanPassword) return res.status(400).json({ error: "Nome, e-mail e senha são obrigatórios" });
     if (!isValidEmail(cleanEmail)) return res.status(400).json({ error: "E-mail inválido" });
-    if (cleanPassword.length < 6) return res.status(400).json({ error: "Senha deve ter pelo menos 6 caracteres" });
+    const _pwErrProf = validatePasswordStrength(cleanPassword);
+    if (_pwErrProf) return res.status(400).json({ error: _pwErrProf });
     if (await db.get("SELECT id FROM users WHERE email = ?", [cleanEmail])) {
       return res.status(409).json({ error: "E-mail já cadastrado" });
     }

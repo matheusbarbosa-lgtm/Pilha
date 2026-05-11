@@ -73,8 +73,18 @@
             <input type="hidden" id="register-invite-token" name="inviteToken" />
             <label>Nome completo <input name="name" placeholder="ex: Ana Silva" required /></label>
             <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" required /></label>
-            <label>Senha <input type="password" name="password" placeholder="mín. 6 caracteres" required minlength="6" /></label>
-            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="6" /></label>
+            <label>Senha
+              <input type="password" id="pw-invite" name="password" placeholder="mín. 8 caracteres" required minlength="8" />
+              <div class="pw-strength-bar" id="pwbar-invite"><span></span></div>
+              <ul class="pw-criteria-list" id="pwcrit-invite">
+                <li data-crit="length">8 caracteres mínimos</li>
+                <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                <li data-crit="lower">Letra minúscula (a-z)</li>
+                <li data-crit="number">Número (0-9)</li>
+                <li data-crit="special">Caractere especial (!@#$%...)</li>
+              </ul>
+            </label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="8" /></label>
             <button class="btn-primary" type="submit">Criar conta e entrar</button>
             <small id="register-invite-error" class="login-error"></small>
           </form>
@@ -89,8 +99,18 @@
             <input type="hidden" id="register-turma-token" name="turmaToken" />
             <label>Nome completo <input name="name" placeholder="ex: Ana Silva" required /></label>
             <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" required /></label>
-            <label>Senha <input type="password" name="password" placeholder="mín. 6 caracteres" required minlength="6" /></label>
-            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="6" /></label>
+            <label>Senha
+              <input type="password" id="pw-turma" name="password" placeholder="mín. 8 caracteres" required minlength="8" />
+              <div class="pw-strength-bar" id="pwbar-turma"><span></span></div>
+              <ul class="pw-criteria-list" id="pwcrit-turma">
+                <li data-crit="length">8 caracteres mínimos</li>
+                <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                <li data-crit="lower">Letra minúscula (a-z)</li>
+                <li data-crit="number">Número (0-9)</li>
+                <li data-crit="special">Caractere especial (!@#$%...)</li>
+              </ul>
+            </label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="8" /></label>
             <button class="btn-primary" type="submit">Criar conta e entrar</button>
             <small id="register-turma-error" class="login-error"></small>
           </form>
@@ -148,8 +168,18 @@
           <p>Crie uma senha forte para sua conta.</p>
           <form id="reset-form" class="auth-form">
             <input type="hidden" name="token" id="reset-token-input" />
-            <label>Nova senha <input type="password" name="newPassword" placeholder="Mínimo 6 caracteres" required minlength="6" /></label>
-            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="Repita a senha" required minlength="6" /></label>
+            <label>Nova senha
+              <input type="password" id="pw-reset" name="newPassword" placeholder="mín. 8 caracteres" required minlength="8" />
+              <div class="pw-strength-bar" id="pwbar-reset"><span></span></div>
+              <ul class="pw-criteria-list" id="pwcrit-reset">
+                <li data-crit="length">8 caracteres mínimos</li>
+                <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                <li data-crit="lower">Letra minúscula (a-z)</li>
+                <li data-crit="number">Número (0-9)</li>
+                <li data-crit="special">Caractere especial (!@#$%...)</li>
+              </ul>
+            </label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="Repita a senha" required minlength="8" /></label>
             <button class="btn-primary" type="submit">Salvar nova senha</button>
             <small id="reset-error" class="login-error"></small>
           </form>
@@ -160,8 +190,18 @@
           <h1>Crie sua senha</h1>
           <p>Por segurança, defina uma senha pessoal para acessar a plataforma.</p>
           <form id="change-password-form" class="auth-form">
-            <label>Nova senha <input type="password" name="newPassword" placeholder="Mínimo 6 caracteres" required minlength="6" /></label>
-            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="Repita a senha" required minlength="6" /></label>
+            <label>Nova senha
+              <input type="password" id="pw-change" name="newPassword" placeholder="mín. 8 caracteres" required minlength="8" />
+              <div class="pw-strength-bar" id="pwbar-change"><span></span></div>
+              <ul class="pw-criteria-list" id="pwcrit-change">
+                <li data-crit="length">8 caracteres mínimos</li>
+                <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                <li data-crit="lower">Letra minúscula (a-z)</li>
+                <li data-crit="number">Número (0-9)</li>
+                <li data-crit="special">Caractere especial (!@#$%...)</li>
+              </ul>
+            </label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="Repita a senha" required minlength="8" /></label>
             <button class="btn-primary" type="submit">Salvar e entrar</button>
             <small id="change-password-error" class="login-error"></small>
           </form>
@@ -214,8 +254,18 @@
                 </select>
               </label>
             </div>
-            <label>Senha <input type="password" name="password" placeholder="mín. 6 caracteres" required /></label>
-            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required /></label>
+            <label>Senha
+              <input type="password" id="pw-register" name="password" placeholder="mín. 8 caracteres" required minlength="8" />
+              <div class="pw-strength-bar" id="pwbar-register"><span></span></div>
+              <ul class="pw-criteria-list" id="pwcrit-register">
+                <li data-crit="length">8 caracteres mínimos</li>
+                <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                <li data-crit="lower">Letra minúscula (a-z)</li>
+                <li data-crit="number">Número (0-9)</li>
+                <li data-crit="special">Caractere especial (!@#$%...)</li>
+              </ul>
+            </label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="8" /></label>
             <button class="btn-primary" type="submit">Criar conta</button>
             <small id="register-error" class="login-error"></small>
             <small id="register-success" class="ok-msg"></small>
@@ -239,8 +289,18 @@
               </label>
             </div>
             <label>E-mail institucional <input type="email" name="email" placeholder="voce@unipam.edu.br" required /></label>
-            <label>Nova senha <input type="password" name="password" placeholder="mín. 6 caracteres" required /></label>
-            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required /></label>
+            <label>Nova senha
+              <input type="password" id="pw-onboarding" name="password" placeholder="mín. 8 caracteres" required minlength="8" />
+              <div class="pw-strength-bar" id="pwbar-onboarding"><span></span></div>
+              <ul class="pw-criteria-list" id="pwcrit-onboarding">
+                <li data-crit="length">8 caracteres mínimos</li>
+                <li data-crit="upper">Letra maiúscula (A-Z)</li>
+                <li data-crit="lower">Letra minúscula (a-z)</li>
+                <li data-crit="number">Número (0-9)</li>
+                <li data-crit="special">Caractere especial (!@#$%...)</li>
+              </ul>
+            </label>
+            <label>Confirmar senha <input type="password" name="confirmPassword" placeholder="••••••" required minlength="8" /></label>
 
             <div id="onboarding-create-section" class="onboarding-section-box">
               <span class="onboarding-section-label">Grupo do Projeto</span>

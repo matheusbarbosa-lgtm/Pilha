@@ -1,23 +1,58 @@
-// ── Barra de força de senha ───────────────────────────────
+// ── Política de senha forte ───────────────────────────────
+// Espelha validatePasswordStrength do backend. Retorna null se ok, string de erro se inválida.
+function validatePasswordStrength(pw) {
+  const s = String(pw || "");
+  if (s.length < 8)            return "Senha deve ter pelo menos 8 caracteres";
+  if (!/[A-Z]/.test(s))        return "Senha deve conter pelo menos uma letra maiúscula";
+  if (!/[a-z]/.test(s))        return "Senha deve conter pelo menos uma letra minúscula";
+  if (!/[0-9]/.test(s))        return "Senha deve conter pelo menos um número";
+  if (!/[^A-Za-z0-9]/.test(s)) return "Senha deve conter pelo menos um caractere especial (!@#$%...)";
+  return null;
+}
+
+// ── Barra de força + checklist de critérios ──────────────
 function pwStrength(pw) {
-  if (!pw || pw.length < 6) return "weak";
+  if (!pw || pw.length < 8) return "weak";
   const has = (re) => re.test(pw);
-  const score = [pw.length >= 8, has(/[A-Z]/), has(/[0-9]/), has(/[^A-Za-z0-9]/)].filter(Boolean).length;
-  if (score >= 4 && pw.length >= 12) return "strong";
-  if (score >= 3) return "good";
-  if (score >= 2) return "fair";
+  const meets = [has(/[A-Z]/), has(/[a-z]/), has(/[0-9]/), has(/[^A-Za-z0-9]/)].filter(Boolean).length;
+  if (meets === 4 && pw.length >= 12) return "strong";
+  if (meets >= 3) return "good";
+  if (meets >= 2) return "fair";
   return "weak";
 }
-function attachPwBar(inputId, barId) {
-  const inp = document.getElementById(inputId);
-  const bar = document.getElementById(barId);
-  if (!inp || !bar) return;
+
+const _PW_CHECKS = {
+  length:  pw => pw.length >= 8,
+  upper:   pw => /[A-Z]/.test(pw),
+  lower:   pw => /[a-z]/.test(pw),
+  number:  pw => /[0-9]/.test(pw),
+  special: pw => /[^A-Za-z0-9]/.test(pw),
+};
+
+function attachPwStrengthUI(inputId, barId, criteriaId) {
+  const inp  = document.getElementById(inputId);
+  const bar  = document.getElementById(barId);
+  const crit = document.getElementById(criteriaId);
+  if (!inp) return;
   inp.addEventListener("input", () => {
-    const level = pwStrength(inp.value);
-    bar.className = `pw-strength-bar ${inp.value ? level : ""}`;
+    const pw = inp.value;
+    if (bar)  bar.className = `pw-strength-bar ${pw ? pwStrength(pw) : ""}`;
+    if (crit) crit.querySelectorAll("[data-crit]").forEach(li => {
+      li.classList.toggle("met", _PW_CHECKS[li.dataset.crit]?.(pw) ?? false);
+    });
   });
 }
-attachPwBar("login-password-input", "login-pw-bar");
+
+// Login: só barra (sem checklist — campo de autenticação, não criação)
+attachPwStrengthUI("login-password-input", "login-pw-bar", null);
+
+// Formulários de criação/troca de senha: barra + checklist
+attachPwStrengthUI("pw-invite",    "pwbar-invite",    "pwcrit-invite");
+attachPwStrengthUI("pw-turma",     "pwbar-turma",     "pwcrit-turma");
+attachPwStrengthUI("pw-reset",     "pwbar-reset",     "pwcrit-reset");
+attachPwStrengthUI("pw-change",    "pwbar-change",    "pwcrit-change");
+attachPwStrengthUI("pw-register",  "pwbar-register",  "pwcrit-register");
+attachPwStrengthUI("pw-onboarding","pwbar-onboarding","pwcrit-onboarding");
 
 // ── Tema por papel ────────────────────────────────────────
 function applyTheme(user) {
@@ -273,6 +308,8 @@ if (resetForm) {
     const newPassword = String(fd.get("newPassword") || "").trim();
     const confirmPassword = String(fd.get("confirmPassword") || "").trim();
     if (newPassword !== confirmPassword) { if (resetError) resetError.textContent = "Senhas não coincidem"; return; }
+    const _pwErrReset = validatePasswordStrength(newPassword);
+    if (_pwErrReset) { if (resetError) resetError.textContent = _pwErrReset; return; }
     try {
       await apiFetch("/api/auth/reset-password", {
         method: "POST",
@@ -301,6 +338,8 @@ if (changePasswordForm) {
       changePasswordError.textContent = "As senhas não coincidem";
       return;
     }
+    const _pwErrChange = validatePasswordStrength(newPassword);
+    if (_pwErrChange) { changePasswordError.textContent = _pwErrChange; return; }
     try {
       await apiFetch("/api/auth/change-password", {
         method: "POST",
@@ -329,6 +368,8 @@ if (registerTurmaForm) {
     const pw = String(fd.get("password") || "");
     const cpw = String(fd.get("confirmPassword") || "");
     if (pw !== cpw) { if (errEl) errEl.textContent = "As senhas não coincidem"; return; }
+    const _pwErrTurma = validatePasswordStrength(pw);
+    if (_pwErrTurma) { if (errEl) errEl.textContent = _pwErrTurma; return; }
     try {
       const res = await apiFetch("/api/auth/register-by-turma", {
         method: "POST",
@@ -357,6 +398,8 @@ if (registerInviteForm) {
     const pw = String(fd.get("password") || "");
     const cpw = String(fd.get("confirmPassword") || "");
     if (pw !== cpw) { if (errEl) errEl.textContent = "As senhas não coincidem"; return; }
+    const _pwErrInvite = validatePasswordStrength(pw);
+    if (_pwErrInvite) { if (errEl) errEl.textContent = _pwErrInvite; return; }
     try {
       const res = await apiFetch("/api/auth/register-by-invite", {
         method: "POST",
@@ -409,9 +452,11 @@ registerForm.addEventListener("submit", async (event) => {
   const confirmPassword = String(data.get("confirmPassword") || "");
 
   if (payload.password !== confirmPassword) {
-    registerError.textContent = "As senhas nao coincidem.";
+    registerError.textContent = "As senhas não coincidem.";
     return;
   }
+  const _pwErrRegister = validatePasswordStrength(payload.password);
+  if (_pwErrRegister) { registerError.textContent = _pwErrRegister; return; }
 
   try {
     await apiFetch("/api/auth/register", {
@@ -486,6 +531,10 @@ if (onboardingForm) {
     const mode = String(data.get("onboardingMode") || "create");
     const inviteToken = String(data.get("inviteToken") || "").trim();
     const photo = state.pendingPhoto || null;
+
+    if (password !== confirmPassword) { onboardingError.textContent = "As senhas não coincidem"; return; }
+    const _pwErrOnboarding = validatePasswordStrength(password);
+    if (_pwErrOnboarding) { onboardingError.textContent = _pwErrOnboarding; return; }
 
     const payload = { email, password, confirmPassword, turma, periodo, photo, mode };
 
