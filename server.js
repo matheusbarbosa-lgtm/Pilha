@@ -1755,7 +1755,14 @@ async function createApp(dbOverride, evalDbOverride) {
     if (await db.get("SELECT id FROM users WHERE email = ?", [cleanEmail])) {
       return res.status(409).json({ error: "E-mail já cadastrado" });
     }
-    const username = sanitizeUsername(cleanEmail.split("@")[0] + "_" + Math.floor(Math.random() * 999));
+    const baseUsername = sanitizeUsername(cleanEmail.split("@")[0]) || "professor";
+    let username = baseUsername;
+    let usernameSuffix = 2;
+    while (await db.get("SELECT id FROM users WHERE username = ?", [username])) {
+      const suffix = String(usernameSuffix++);
+      const prefixLength = Math.max(1, 49 - suffix.length);
+      username = sanitizeUsername(`${baseUsername.slice(0, prefixLength)}.${suffix}`);
+    }
     const passwordHash = bcrypt.hashSync(cleanPassword, 10);
     const created = await db.run(
       "INSERT INTO users (username, name, role, email, is_admin, onboarding_done, must_change_password, password_hash) VALUES (?, ?, 'professor', ?, 0, 1, 1, ?)",
@@ -1813,7 +1820,7 @@ async function createApp(dbOverride, evalDbOverride) {
         html: welcomeHtml
       }).catch(err => console.error("[EMAIL] Erro ao enviar boas-vindas professor:", err));
     }
-    return res.status(201).json({ id: String(created.lastID), email: cleanEmail });
+    return res.status(201).json({ id: String(created.lastID), username, email: cleanEmail });
   });
 
   app.post("/api/admin/cmd", authRequired, adminOnly, async (req, res) => {

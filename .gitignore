@@ -1,21 +1,44 @@
-﻿node_modules/
+﻿# Dependencias
+node_modules/
+npm-debug.log*
+
+# Variaveis de ambiente — NUNCA commitar
 .env
 .env.*
 !.env.example
 
-*.sqlite
-*.sqlite3
+# Bancos SQLite — dados ficam fora do repo
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
+data/
+campusflow.db
+grading.db
 
+# Uploads de usuarios
 uploads/
-coverage/
-dist/
-build/
 
+# Logs
+logs/
 *.log
-npm-debug.log*
-yarn-error.log*
 
+# Sistema operacional
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Editores
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Build / temp
+dist/
+build/
+tmp/
+.cache/
+
+# Docker — dados locais
+docker-data/
