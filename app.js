@@ -3160,9 +3160,9 @@ async function renderAvaliacao() {
                   <th rowspan="2" class="eval-th-nota">NOTA<br>FINAL</th>
                 </tr>
                 <tr class="eval-thead-acts">
-                  ${planActHeaders || '<th class="eval-act-th eval-act-empty">—</th>'}
+                  ${planActHeaders || '<th class="eval-act-th eval-act-empty">Total</th>'}
                   <th class="eval-th-total">Total</th>
-                  ${devActHeaders || '<th class="eval-act-th eval-act-empty">—</th>'}
+                  ${devActHeaders || '<th class="eval-act-th eval-act-empty">Total</th>'}
                   <th class="eval-th-total">Total</th>
                 </tr>
               </thead>

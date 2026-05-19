@@ -71,7 +71,8 @@ async function renderAvaliacao() {
           <div class="eval-act-th-inner">
             <span class="eval-act-name" title="${escapeHtml(act.name)}">${escapeHtml(act.name)}</span>
             <div class="eval-act-meta">
-              <span class="eval-act-pts">${Number(act.max_pts)}pts</span>
+              <input type="number" class="eval-act-maxpts-input" data-act-id="${act.id}" data-pid="${pid}" value="${Number(act.max_pts)}" min="0.5" max="10" step="0.5" style="width:72px" />
+              <span style="margin-left:.35rem;color:var(--muted);font-size:0.92rem">pts</span>
               <button class="eval-del-act btn-link" data-act-id="${act.id}" data-pid="${pid}" title="Remover atividade">×</button>
             </div>
           </div>
@@ -83,7 +84,8 @@ async function renderAvaliacao() {
           <div class="eval-act-th-inner">
             <span class="eval-act-name" title="${escapeHtml(act.name)}">${escapeHtml(act.name)}</span>
             <div class="eval-act-meta">
-              <span class="eval-act-pts">${Number(act.max_pts)}pts</span>
+              <input type="number" class="eval-act-maxpts-input" data-act-id="${act.id}" data-pid="${pid}" value="${Number(act.max_pts)}" min="0.5" max="10" step="0.5" style="width:72px" />
+              <span style="margin-left:.35rem;color:var(--muted);font-size:0.92rem">pts</span>
               <button class="eval-del-act btn-link" data-act-id="${act.id}" data-pid="${pid}" title="Remover atividade">×</button>
             </div>
           </div>
@@ -278,6 +280,35 @@ function attachAvaliacaoEvents(container) {
         });
         updateProjectCalculations(input.dataset.pid, container);
       } catch (err) { console.error("Erro ao salvar nota:", err); }
+    });
+  });
+
+  // Editar pontos máximos da atividade inline
+  container.querySelectorAll('.eval-act-maxpts-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const val = parseFloat(inp.value) || 0;
+      const bounded = Math.max(0.5, Math.min(10, val));
+      inp.value = bounded;
+      updateProjectCalculations(inp.dataset.pid, container);
+    });
+    inp.addEventListener('blur', async () => {
+      const actId = inp.dataset.actId;
+      const maxPts = Math.max(0, parseFloat(inp.value) || 0);
+      try {
+        await apiFetch(`/api/eval/activities/${actId}`, { method: 'PATCH', body: JSON.stringify({ max_pts: maxPts }) });
+        // Atualiza atributo max nos inputs de pontuação e ajusta valores que excedem
+        container.querySelectorAll(`.eval-score-input[data-act-id="${actId}"]`).forEach(si => {
+          si.max = maxPts;
+          if (parseFloat(si.value) > maxPts) {
+            si.value = maxPts;
+            si.dispatchEvent(new Event('blur'));
+          }
+        });
+        updateProjectCalculations(inp.dataset.pid, container);
+      } catch (err) {
+        console.error('Erro ao salvar max_pts:', err);
+        alert('Erro ao salvar pontos da atividade: ' + (err.message || err));
+      }
     });
   });
 
