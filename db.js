@@ -223,6 +223,10 @@ async function initDb(dbPath) {
     await db.exec("ALTER TABLE projects ADD COLUMN discipline TEXT DEFAULT ''");
   if (!projColNames.includes("start_date"))
     await db.exec("ALTER TABLE projects ADD COLUMN start_date TEXT DEFAULT ''");
+  if (!projColNames.includes("docs_unlocked"))
+    await db.exec("ALTER TABLE projects ADD COLUMN docs_unlocked INTEGER NOT NULL DEFAULT 0");
+  if (!projColNames.includes("name_confirmed"))
+    await db.exec("ALTER TABLE projects ADD COLUMN name_confirmed INTEGER NOT NULL DEFAULT 0");
 
   const memberCols = await db.all("PRAGMA table_info(project_members)");
   if (!memberCols.some(c => c.name === "scrum_role"))
@@ -260,7 +264,21 @@ async function initDb(dbPath) {
     await db.exec("ALTER TABLE users ADD COLUMN profile_complete INTEGER NOT NULL DEFAULT 0");
   if (!userColNames.includes("turma_id"))
     await db.exec("ALTER TABLE users ADD COLUMN turma_id INTEGER DEFAULT NULL");
+  if (!userColNames.includes("totp_secret"))
+    await db.exec("ALTER TABLE users ADD COLUMN totp_secret TEXT DEFAULT NULL");
+  if (!userColNames.includes("totp_enabled"))
+    await db.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0");
 
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS totp_recovery_codes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      code_hash TEXT NOT NULL,
+      used INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT DEFAULT (datetime('now')),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+  `);
 
   await db.exec(`
     CREATE TABLE IF NOT EXISTS password_reset_tokens (

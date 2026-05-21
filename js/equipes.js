@@ -73,7 +73,11 @@ async function openProjectDetail(projectId) {
         </table>`
       : "<p style='color:var(--muted);font-size:.85rem;'>Nenhuma tarefa cadastrada.</p>";
 
-    // Botões TAP / PI
+    // Botões TAP / PI — visíveis apenas se docs liberados (alunos) ou sempre (prof/admin)
+    const isProf = state.currentUser?.role === "professor" || state.currentUser?.isAdmin;
+    const docBtnsEl = document.getElementById("pd-doc-btns");
+    if (docBtnsEl) docBtnsEl.style.display = (isProf || p.docsUnlocked) ? "flex" : "none";
+
     document.querySelectorAll(".pd-doc-btn").forEach((btn) => {
       btn.onclick = () => {
         const type = btn.dataset.doc;
@@ -87,6 +91,31 @@ async function openProjectDetail(projectId) {
         if (sel) { sel.value = String(projectId); loadDoc(type); }
       };
     });
+
+    // Painel de unlock de docs (professor/admin)
+    const unlockPanel = document.getElementById("pd-unlock-panel");
+    const unlockBtn   = document.getElementById("pd-unlock-btn");
+    const unlockStatus = document.getElementById("pd-unlock-status");
+    if (unlockPanel && isProf) {
+      unlockPanel.style.display = "";
+      let unlocked = p.docsUnlocked;
+      const refresh = () => {
+        unlockStatus.textContent = unlocked ? "Documentos liberados para os alunos" : "Documentos bloqueados para os alunos";
+        unlockBtn.textContent = unlocked ? "🔒 Bloquear" : "🔓 Liberar TAP e PI";
+        unlockBtn.className = unlocked ? "btn-secondary btn-sm" : "btn-primary btn-sm";
+        if (docBtnsEl) docBtnsEl.style.display = "flex";
+      };
+      refresh();
+      unlockBtn.onclick = async () => {
+        try {
+          const r = await apiFetch(`/api/projects/${projectId}/unlock-docs`, { method: "PATCH" });
+          unlocked = r.docsUnlocked;
+          refresh();
+        } catch (e) { alert(e.message); }
+      };
+    } else if (unlockPanel) {
+      unlockPanel.style.display = "none";
+    }
 
   } catch (err) { alert(err.message); }
 }
@@ -119,6 +148,8 @@ function renderEquipesAluno() {
   alunoGroupsEl.innerHTML = state.projects.map((p) => {
     const profiles = Array.isArray(p.memberProfiles) ? p.memberProfiles : [];
     const fmt = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }) : "";
+    const myProfile = profiles.find((m) => m.name === myName);
+    const isPO = myProfile?.role === "Product Owner";
 
     const memberListHtml = profiles.map((m) => {
       const initials = (m.name || "?").split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase();
@@ -131,11 +162,17 @@ function renderEquipesAluno() {
         </div>`;
     }).join("");
 
+    // Botão de definir nome (só para PO quando nome não confirmado)
+    const nameBtnHtml = (isPO && !p.nameConfirmed)
+      ? `<button class="btn-outline-primary btn-sm pnm-open-btn" data-pid="${escapeHtml(p.id)}" data-pname="${escapeHtml(p.name)}" style="font-size:.75rem;letter-spacing:.04em;font-weight:600;">✏️ DEFINIR NOME DO PROJETO</button>`
+      : "";
+
     return `
       <article class="card group-project-card">
         <div class="group-project-header">
           <div class="group-project-title-row">
             <h3 class="group-project-name" style="flex:1;">${escapeHtml(p.name)}</h3>
+            ${nameBtnHtml}
             <span class="chip" style="background:var(--primary-faint,#4f6ef720);color:var(--primary,#4f6ef7);font-size:.7rem;">${profiles.length} membro${profiles.length !== 1 ? "s" : ""}</span>
           </div>
           <div class="group-project-meta">
@@ -148,6 +185,65 @@ function renderEquipesAluno() {
         <div class="group-member-list">${memberListHtml}</div>
       </article>`;
   }).join("");
+
+  // Ligar botões de definir nome após renderizar o HTML
+  alunoGroupsEl.querySelectorAll(".pnm-open-btn").forEach((btn) => {
+    btn.addEventListener("click", () => openNameModal(btn.dataset.pid, btn.dataset.pname));
+  });
+}
+
+function openNameModal(projectId, currentName) {
+  let modal = document.getElementById("project-name-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "project-name-modal";
+    modal.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);";
+    modal.innerHTML = `
+      <div style="background:var(--surface,#fff);border-radius:var(--r-lg,12px);padding:2rem;width:min(480px,92vw);box-shadow:0 8px 32px rgba(0,0,0,.18);display:flex;flex-direction:column;gap:1.25rem;">
+        <h2 style="margin:0;font-size:1.1rem;font-weight:700;">Definir nome do projeto</h2>
+        <div>
+          <label style="font-size:.85rem;color:var(--muted);display:block;margin-bottom:.4rem;">Nome do projeto</label>
+          <input id="pnm-input" type="text" maxlength="120" style="width:100%;box-sizing:border-box;font-size:1rem;padding:.55rem .75rem;border:1.5px solid var(--line);border-radius:var(--r);outline:none;" placeholder="Ex: Sistema de Gestão de Estoque" />
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:.6rem;font-size:.82rem;color:var(--muted);cursor:pointer;line-height:1.45;">
+          <input id="pnm-check" type="checkbox" style="width:18px;height:18px;min-width:18px;max-width:18px;margin:.15rem 0 0;padding:0;flex:0 0 18px;accent-color:var(--primary);" />
+          <span style="flex:1;">Estou ciente de que, após confirmar, o nome do projeto <strong style="color:var(--text);">só poderá ser alterado pelo professor responsável.</strong></span>
+        </label>
+        <div style="display:flex;gap:.75rem;justify-content:flex-end;">
+          <button class="btn-secondary" id="pnm-cancel">Cancelar</button>
+          <button class="btn-primary" id="pnm-confirm">Confirmar nome</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+
+  const input = modal.querySelector("#pnm-input");
+  const check = modal.querySelector("#pnm-check");
+  input.value = currentName;
+  check.checked = false;
+  modal.style.display = "flex";
+  input.focus();
+
+  modal.querySelector("#pnm-cancel").onclick = () => { modal.style.display = "none"; };
+  modal.onclick = (e) => { if (e.target === modal) modal.style.display = "none"; };
+
+  modal.querySelector("#pnm-confirm").onclick = async () => {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    if (!check.checked) { check.parentElement.style.color = "var(--danger,#c0392b)"; check.focus(); return; }
+    check.parentElement.style.color = "";
+    try {
+      await apiFetch(`/api/projects/${projectId}/confirm-name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      modal.style.display = "none";
+      await loadData();
+      renderAll();
+      renderEquipesAluno();
+    } catch (e) { alert(e.message); }
+  };
 }
 
 // ── Equipes (admin) ───────────────────────────────────────

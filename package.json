@@ -13,17 +13,21 @@
     "testTimeout": 15000
   },
   "dependencies": {
+    "argon2": "^0.44.0",
     "bcryptjs": "^2.4.3",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.3.1",
     "exceljs": "^4.4.0",
     "express": "^4.21.2",
+    "helmet": "^8.1.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.1.1",
     "nodemailer": "^8.0.2",
+    "qrcode": "^1.5.4",
     "socket.io": "^4.8.3",
+    "speakeasy": "^2.0.0",
     "sqlite": "^5.1.1",
-    "sqlite3": "^5.1.7",
+    "sqlite3": "5.1.7",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {

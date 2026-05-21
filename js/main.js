@@ -61,6 +61,17 @@ function renderByRole() {
   const projectsListCard = document.getElementById("projects-list-card");
   if (projectsListCard) projectsListCard.classList.toggle("hidden", !professor);
 
+  // Doc-cards (TAP/PI) na página Projetos: professores sempre veem; alunos só se tiver projeto com docs liberados
+  const docCardsRow = document.getElementById("doc-cards-row");
+  if (docCardsRow) {
+    if (professor) {
+      docCardsRow.style.display = "";
+    } else {
+      const hasUnlocked = state.projects.some((p) => p.docsUnlocked);
+      docCardsRow.style.display = hasUnlocked ? "" : "none";
+    }
+  }
+
   updateTopbarDisplay();
 
   if (!state.profilePhotoLoaded) {

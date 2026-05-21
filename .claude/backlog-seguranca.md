@@ -10,11 +10,11 @@
 
 | Fase | Nome | Status | Branch |
 |------|------|--------|--------|
-| 1 | Política de senha forte | 🔲 Pendente | `seguranca/fase-1-politica-senha` |
-| 2 | CSP, Helmet e headers | 🔲 Pendente | `seguranca/fase-2-helmet-csp` |
-| 3 | CSRF token | 🔲 Pendente | `seguranca/fase-3-csrf` |
-| 4 | Migração bcrypt → Argon2id | 🔲 Pendente | `seguranca/fase-4-argon2id` |
-| 5 | TOTP / Google Authenticator | 🔲 Pendente | `seguranca/fase-5-totp` |
+| 1 | Política de senha forte | ✅ Concluída (APPROVED) | `seguranca/fase-1-politica-senha` |
+| 2 | CSP, Helmet e headers | ✅ Concluída (APPROVED) | `seguranca/fase-2-helmet-csp` |
+| 3 | CSRF token | ✅ Concluída (APPROVED) | `seguranca/fase-3-csrf` |
+| 4 | Migração bcrypt → Argon2id | ✅ Concluída (APPROVED) | `seguranca/fase-1-politica-senha` |
+| 5 | TOTP / Google Authenticator | ✅ Concluída (APPROVED) | `seguranca/fase-1-politica-senha` |
 
 Legenda: 🔲 Pendente | 🔄 Em andamento | 👀 Em revisão | ✅ Concluída | ❌ Bloqueada
 
