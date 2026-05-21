@@ -2,8 +2,11 @@
 
 **Branch:** `seguranca/fase-1-politica-senha`
 **Revisor:** Codex (agente auditor)
-**Data:** 2026-05-11
-**Veredicto:** CHANGES_REQUESTED
+**Data:** 2026-05-20
+**Veredicto:** APPROVED
+
+> **3ª rodada** — correção do formulário admin aplicada e verificada.
+> `npm test`: 15 testes passando (0 falhas).
 
 ---
 
@@ -27,11 +30,11 @@ Ainda há uma lacuna no fluxo admin de criação de professor: o campo de senha 
 | Validação cobre TODOS os fluxos: register, register-by-turma, register-by-invite, student-onboarding, change-password, reset-password, criação de professor pelo admin | ✅ OK | Chamadas em `server.js:443`, `501`, `569`, `596`, `1573`, `1604`, `1769` |
 | Senhas ANTIGAS continuam funcionando | ✅ OK | Login continua usando `bcrypt.compareSync` sobre `password_hash`; não há migração retroativa nesta fase |
 | Validação retorna mensagem clara ao usuário | ✅ OK | Cada critério retorna mensagem específica em português |
-| Frontend exibe barra de força de senha em tempo real | ❌ FALHOU | Corrigido em `js/auth.js` e `cadastro.html`, mas ausente em `views/admin.html:10` para criação de professor |
-| Frontend exibe checklist visual dos critérios | ❌ FALHOU | Ausente no formulário `#create-professor-form` |
-| Checklist visual atualiza em tempo real enquanto usuário digita | ❌ FALHOU | `attachPwStrengthUI` não é chamado para `pw-admin-prof`; `js/admin.js:33-51` não implementa validação visual |
-| Testes cobrem senha válida, sem maiúscula, sem número, sem especial e abaixo de 8 chars | ✅ OK | `tests/senha.test.js` cobre os critérios por unitário e integração em `/api/auth/register` |
-| `npm test`: todos os testes passando | ✅ OK | `npm.cmd test -- --runInBand --forceExit`: 1 suite, 15 testes passando |
+| Frontend exibe barra de força de senha em tempo real | ✅ OK | Corrigido: `views/admin.html:12` tem `.pw-strength-bar#pwbar-admin-prof`; `js/admin.js:33` chama `attachPwStrengthUI` |
+| Frontend exibe checklist visual dos critérios | ✅ OK | Corrigido: `views/admin.html:13-19` tem `.pw-criteria-list#pwcrit-admin-prof` com 5 critérios via `data-crit` |
+| Checklist visual atualiza em tempo real enquanto usuário digita | ✅ OK | `attachPwStrengthUI("pw-admin-prof","pwbar-admin-prof","pwcrit-admin-prof")` em `js/admin.js:33` |
+| Testes cobrem senha válida, sem maiúscula, sem número, sem especial e abaixo de 8 chars | ✅ OK | `tests/senha.test.js` — 15 testes passando |
+| `npm test`: todos os testes passando | ✅ OK | 15 testes passando, 0 falhas (verificado em 2026-05-20) |
 
 ---
 
@@ -52,43 +55,36 @@ Ainda há uma lacuna no fluxo admin de criação de professor: o campo de senha 
 
 ---
 
-## Verificação das pendências da revisão 1
+## Verificação das pendências da revisão 2
 
-| Pendência anterior | Resultado da segunda rodada |
+| Pendência anterior | Resultado da terceira rodada |
 |------|--------|
-| Frontend incompleto | ❌ Parcial. `shell-top.html`, `js/auth.js` e `cadastro.html` foram corrigidos, mas `views/admin.html`/`js/admin.js` continuam sem barra/checklist/validação client-side no criar professor |
-| `cadastro.html` sem validação | ✅ Resolvido. `cadastro.html:141-269` adiciona barra, checklist, listener em tempo real e validação antes do `fetch` |
-| Testes ausentes | ✅ Resolvido em termos de presença. `tests/senha.test.js` foi criado e a suíte passa |
+| `views/admin.html` sem barra/checklist no form criar professor | ✅ Resolvido. `views/admin.html:12-19` tem `.pw-strength-bar` e `.pw-criteria-list` com `data-crit` para os 5 critérios |
+| `js/admin.js` sem `attachPwStrengthUI` / sem validação client-side | ✅ Resolvido. `js/admin.js:33` chama `attachPwStrengthUI`; `js/admin.js:47-48` valida com `validatePasswordStrength` antes do submit |
 
 ---
 
 ## Problemas encontrados
 
-### [IMPORTANTE] Criação de professor pelo admin não tem barra/checklist nem validação client-side
-- **Arquivo:** `views/admin.html`
-- **Linha:** ~10
-- **Descrição:** O campo `pw-admin-prof` recebeu `placeholder="mín. 8 caracteres"` e `minlength="8"`, mas não há `.pw-strength-bar`, `.pw-criteria-list` nem bind equivalente a `attachPwStrengthUI`.
-- **Impacto:** A checklist da fase exige barra de força, checklist visual e atualização em tempo real no frontend. O fluxo admin de criação de professor ainda depende apenas do HTML `minlength` e da rejeição backend após submit.
-- **Sugestão:** Reutilizar o mesmo padrão de `shell-top.html`: adicionar barra/checklist ao formulário admin e chamar lógica equivalente para `pw-admin-prof`; em `js/admin.js`, validar `validatePasswordStrength(payload.password)` antes do `apiFetch`.
+Nenhum problema crítico ou importante encontrado nesta rodada.
 
 ### [SUGESTÃO] Cobertura de integração poderia incluir todos os fluxos alterados
 - **Arquivo:** `tests/senha.test.js`
 - **Linha:** ~75
-- **Descrição:** Os testes verificam a função replicada e os endpoints `/api/auth/register` e `/api/auth/reset-password`, mas não exercitam `change-password`, `student-onboarding`, `register-by-turma`, `register-by-invite` e `/api/admin/professor`.
-- **Impacto:** A inspeção de código mostra as chamadas corretas, mas regressões de wiring nesses endpoints poderiam passar.
-- **Sugestão:** Adicionar pelo menos um teste de rejeição de senha fraca para cada fluxo protegido pela política.
+- **Descrição:** Os testes verificam a função e os endpoints `/api/auth/register` e `/api/auth/reset-password`, mas não exercitam `change-password`, `student-onboarding`, `register-by-turma`, `register-by-invite` e `/api/admin/professor`.
+- **Impacto:** Baixo — inspeção de código confirma as chamadas corretas; regressões futuras de wiring poderiam passar silenciosamente.
+- **Sugestão:** Adicionar testes de rejeição de senha fraca para cada fluxo em uma iteração futura. Não bloqueia o merge.
 
 ---
 
 ## Testes
 
 - Comando executado: `npm.cmd test -- --runInBand --forceExit`
-- Resultado: 1 suite passando, 15 testes passando, 0 falhas
-- Observação: `npm test` via PowerShell falhou por `ExecutionPolicy` bloqueando `npm.ps1`; a suíte foi executada com sucesso via `npm.cmd`.
-- Cobertura da mudança: parcial; suficiente para provar os critérios principais, mas não cobre todos os endpoints modificados.
+- Resultado: 1 suite passando, **15 testes passando, 0 falhas**
+- Cobertura da mudança: suficiente para provar os critérios principais da fase.
 
 ---
 
 ## Decisão final
 
-**CHANGES_REQUESTED** — não aprovar ainda. Corrigir o fluxo admin de criação de professor para cumprir a checklist visual/client-side da Fase 1 e ressubmeter para nova rodada.
+**APPROVED** — todos os itens críticos da Fase 1 passaram. A barra de força e o checklist visual estão presentes e funcionais em todos os formulários de senha (registro, onboarding, troca, reset, cadastro por turma, cadastro por convite e criação de professor pelo admin). Nenhum item de segurança ou retrocompatibilidade falhou. O dono pode fazer merge após validação manual no staging.

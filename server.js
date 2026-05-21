@@ -3,11 +3,15 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
+const helmet = require("helmet");
 const http = require("http");
 const { Server: SocketServer } = require("socket.io");
 const multer = require("multer");
 const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
+const argon2 = require("argon2");
+const speakeasy = require("speakeasy");
+const QRCode = require("qrcode");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 let initDb, initEvalDb;
@@ -44,6 +48,21 @@ const upload = multer({
 
 
 const PORT = process.env.PORT || 3000;
+
+async function hashPassword(password) {
+  return argon2.hash(String(password), { type: argon2.argon2id });
+}
+
+async function verifyPassword(password, hash) {
+  const pw = String(password);
+  if (hash && hash.startsWith("$argon2")) {
+    const valid = await argon2.verify(hash, pw);
+    return { valid, needsRehash: false };
+  }
+  const valid = bcrypt.compareSync(pw, hash);
+  return { valid, needsRehash: valid };
+}
+
 function sanitize(str, maxLen = 300) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -120,6 +139,7 @@ const otpVerifyRateLimit = makeRateLimiter(5, 15 * 60 * 1000, "Muitas tentativas
 // OTP request: 3 envios / 15 min por IP (anti email-bombing)
 const otpRequestRateLimit = makeRateLimiter(3, 15 * 60 * 1000, "Muitas solicitações de código. Aguarde antes de tentar novamente.");
 const TOKEN_COOKIE = "campusflow_token";
+const CSRF_COOKIE  = "csrf_token";
 const VALID_STATUS = ["todo", "doing", "done", "backlog", "nao_iniciado", "em_progresso", "concluido"];
 const VALID_PRIORITY = ["baixa", "normal", "alta", "urgente", "media"];
 const VALID_URGENCY = ["low", "medium", "high"];
@@ -196,17 +216,40 @@ function buildAuthPayload(user) {
 
 function setAuthCookie(res, payload) {
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "12h" });
-  res.cookie(TOKEN_COOKIE, token, {
-    httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production",
-    maxAge: 12 * 60 * 60 * 1000
-  });
-  // também expõe no header para o frontend guardar em sessionStorage (isolamento por aba)
+  const cookieOpts = { sameSite: "lax", secure: process.env.NODE_ENV === "production", maxAge: 12 * 60 * 60 * 1000 };
+  res.cookie(TOKEN_COOKIE, token, { ...cookieOpts, httpOnly: true });
   res.setHeader("X-Auth-Token", token);
+  // CSRF token — não-HttpOnly para que o JS do frontend possa ler e enviar no header
+  const csrfToken = crypto.randomBytes(32).toString("hex");
+  res.cookie(CSRF_COOKIE, csrfToken, { ...cookieOpts, httpOnly: false });
+}
+
+// Middleware de proteção CSRF para requisições mutáveis autenticadas.
+// Estratégia double-submit cookie: compara X-CSRF-Token header com csrf_token cookie.
+// Rotas públicas (sem cookie de sessão) são isentas — authRequired as rejeitará se necessário.
+// Rotas públicas com proteção própria (token de convite) isentas de CSRF
+const CSRF_EXEMPT_PATHS = new Set(["/api/auth/register-by-invite"]);
+
+function csrfProtect(req, res, next) {
+  const MUTATING = ["POST", "PUT", "PATCH", "DELETE"];
+  if (!MUTATING.includes(req.method)) return next();
+  if (CSRF_EXEMPT_PATHS.has(req.path)) return next();
+  const sessionToken = req.cookies[TOKEN_COOKIE];
+  if (!sessionToken) return next();
+  // Cookie presente mas inválido/expirado → trata como não autenticado (isento de CSRF)
+  try { jwt.verify(sessionToken, JWT_SECRET); } catch (_) { return next(); }
+  const fromHeader = req.headers["x-csrf-token"];
+  const fromCookie = req.cookies[CSRF_COOKIE];
+  if (!fromHeader || !fromCookie || fromHeader !== fromCookie) {
+    return res.status(403).json({ error: "Token CSRF inválido ou ausente" });
+  }
+  next();
 }
 
 async function getProjectsWithMembers(db, where = "", params = []) {
   const rows = await db.all(
     `SELECT p.id, p.name, p.team, p.deadline, p.description, p.discipline, p.start_date,
+            p.docs_unlocked, p.name_confirmed,
             pm.member_name, pm.scrum_role
      FROM projects p
      LEFT JOIN project_members pm ON pm.project_id = p.id
@@ -226,6 +269,8 @@ async function getProjectsWithMembers(db, where = "", params = []) {
         description: row.description || "",
         discipline: row.discipline || "",
         startDate: row.start_date || "",
+        docsUnlocked: row.docs_unlocked === 1,
+        nameConfirmed: row.name_confirmed === 1,
         members: [],
         memberProfiles: []
       });
@@ -242,8 +287,16 @@ async function getProjectsWithMembers(db, where = "", params = []) {
 }
 
 async function buildVisibleScope(db, user) {
-  if (user.role === "professor" || user.isAdmin) {
+  if (user.isAdmin) {
     const projects = await getProjectsWithMembers(db);
+    return { projects, projectIds: new Set(projects.map((p) => Number(p.id))), tasksFilter: "" };
+  }
+  if (user.role === "professor") {
+    const myTurmas = await db.all("SELECT turma FROM turmas WHERE professor_id = ?", [user.id]);
+    if (myTurmas.length === 0) return { projects: [], projectIds: new Set(), tasksFilter: "" };
+    const conditions = myTurmas.map(() => "p.team LIKE ?").join(" OR ");
+    const params = myTurmas.map(t => `%${t.turma}%`);
+    const projects = await getProjectsWithMembers(db, `WHERE (${conditions})`, params);
     return { projects, projectIds: new Set(projects.map((p) => Number(p.id))), tasksFilter: "" };
   }
   const projects = await getProjectsWithMembers(
@@ -252,6 +305,16 @@ async function buildVisibleScope(db, user) {
     [user.name]
   );
   return { projects, projectIds: new Set(projects.map((p) => Number(p.id))), tasksFilter: "" };
+}
+
+async function professorOwnsProject(db, professorId, projectId) {
+  const row = await db.get(
+    `SELECT 1 FROM projects p
+     INNER JOIN turmas t ON p.team LIKE '%' || t.turma || '%'
+     WHERE p.id = ? AND t.professor_id = ?`,
+    [projectId, professorId]
+  );
+  return !!row;
 }
 
 async function getProjectMembersSet(db, projectId) {
@@ -263,6 +326,8 @@ async function createAndSendInvites(db, { projectId, inviterUserId, inviteEmails
   const cleanEmails = Array.from(new Set(
     (inviteEmails || []).map((e) => String(e || "").trim().toLowerCase()).filter(Boolean)
   ));
+  const inviter = await db.get("SELECT name FROM users WHERE id = ?", [inviterUserId]);
+  const poName = sanitize(inviter?.name || "seu colega");
   let created = 0;
   for (const email of cleanEmails) {
     const token = crypto.randomUUID();
@@ -272,13 +337,95 @@ async function createAndSendInvites(db, { projectId, inviterUserId, inviteEmails
     );
     created += 1;
     const inviteLink = `${APP_BASE_URL}/cadastro?invite=${token}`;
+    const recipientName = sanitize(email.split("@")[0]);
     if (mailTransporter) {
       try {
+        const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Convite para o Projeto de PI | PILHA</title>
+  <style>
+    body{margin:0;padding:0;background-color:#f0f4f9;font-family:Arial,Helvetica,sans-serif;color:#0d2137}
+    table{border-spacing:0;border-collapse:collapse}
+    img{border:0;display:block;max-width:100%}
+    .container{width:100%;max-width:600px;margin:0 auto;background-color:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 10px 28px rgba(13,33,55,.12)}
+    .header{background:linear-gradient(135deg,#071433 0%,#0d1e4a 35%,#1a237e 70%,#0d47a1 100%);padding:36px 24px;text-align:center;color:#fff}
+    .logo{font-size:30px;font-weight:800;letter-spacing:1px;margin:0}
+    .subtitle{margin:10px 0 0;font-size:14px;color:#dbeafe;line-height:1.5}
+    .content{padding:36px 40px 28px}
+    h1{margin:0 0 20px;font-size:24px;line-height:1.35;color:#0d2137}
+    p{margin:0 0 18px;font-size:15px;line-height:1.7;color:#344563}
+    .highlight{background-color:#dbeafe;border-left:5px solid #1565C0;border-radius:10px;padding:20px 22px;margin:26px 0}
+    .highlight p{margin:0;color:#0d2137;font-size:15px;line-height:1.7}
+    .orange-box{background-color:#fff3e0;border:1px solid #F47920;border-radius:12px;padding:22px;margin:28px 0}
+    .orange-box h2{margin:0 0 14px;font-size:17px;color:#0d2137}
+    .benefit{padding:12px 0;border-bottom:1px solid #dde3ec;font-size:14px;line-height:1.6;color:#344563}
+    .benefit:last-child{border-bottom:none}
+    .benefit strong{color:#0d2137}
+    .cta-wrap{text-align:center;padding:10px 0 30px}
+    .cta-button{display:inline-block;background-color:#F47920;color:#ffffff!important;text-decoration:none;font-size:16px;font-weight:bold;padding:16px 34px;border-radius:9px;box-shadow:0 8px 18px rgba(244,121,32,.28)}
+    .support{background-color:#f5f8fd;border-radius:12px;padding:22px;text-align:center;margin-top:10px}
+    .support p{margin:0;font-size:14px;color:#6b778c}
+    .support a{color:#1565C0;font-weight:bold;text-decoration:none}
+    .footer{background-color:#0D1E3E;padding:30px 24px;text-align:center;color:#8fa4c8}
+    .footer p{margin:0 0 10px;font-size:13px;line-height:1.6;color:#8fa4c8}
+    .footer strong{color:#fff}
+    .footer-line{background-color:#F47920;height:7px;line-height:7px;font-size:0}
+    @media only screen and (max-width:620px){.container{width:100%!important;border-radius:0!important}.content{padding:30px 22px 24px!important}h1{font-size:21px!important}p{font-size:14px!important}.cta-button{display:block!important;width:auto!important;padding:15px 20px!important}.header{padding:32px 18px!important}}
+  </style>
+</head>
+<body>
+  <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f0f4f9;padding:28px 14px;">
+    <tr><td align="center">
+      <table class="container" width="600" border="0" cellpadding="0" cellspacing="0" role="presentation">
+        <tr><td class="header">
+          <p class="logo">📚 PILHA</p>
+          <p class="subtitle">Gestão Ágil Acadêmica • Projetos Integradores</p>
+        </td></tr>
+        <tr><td class="content">
+          <h1>Olá ${recipientName}! 🚀</h1>
+          <p>Fico feliz em saber que foi convidado para o projeto de PI usando nossa plataforma PILHA !!!</p>
+          <p>Você foi convidado pelo <strong>${poName}</strong> para participar do PI. Segue o link abaixo para participar do projeto:</p>
+          <div class="cta-wrap">
+            <a href="${inviteLink}" target="_blank" class="cta-button">🚀 Participar do projeto no PILHA</a>
+          </div>
+          <div class="highlight">
+            <p>O <strong>PILHA</strong> é uma plataforma de gestão ágil acadêmica criada para facilitar a organização dos Projetos Integradores, conectando alunos, professores e equipes em um ambiente simples, visual e colaborativo.</p>
+          </div>
+          <div class="orange-box">
+            <h2>🎯 O que você pode fazer como aluno no PILHA:</h2>
+            <div class="benefit">📌 <strong>Acompanhar o projeto</strong> — visualize as etapas, atividades e o andamento do PI em tempo real.</div>
+            <div class="benefit">✅ <strong>Organizar suas tarefas</strong> — acompanhe o que precisa ser feito e ajude sua equipe a manter tudo no caminho certo.</div>
+            <div class="benefit">💬 <strong>Comunicar-se com a equipe</strong> — mantenha a troca de informações centralizada dentro da plataforma.</div>
+            <div class="benefit">📊 <strong>Ver o progresso do grupo</strong> — acompanhe o Kanban, os sprints e a evolução das entregas.</div>
+            <div class="benefit">🎓 <strong>Participar melhor do PI</strong> — tenha mais clareza sobre prazos, responsabilidades e próximos passos.</div>
+          </div>
+          <p>Depois de acessar o convite, entre na plataforma, confira as informações do projeto e participe junto com sua equipe.</p>
+          <div class="support">
+            <p>Precisa de ajuda? Entre em contato com o suporte pelo e-mail:<br>
+              <a href="mailto:joaovitorcesario@hotmail.com">joaovitorcesario@hotmail.com</a>
+            </p>
+          </div>
+        </td></tr>
+        <tr><td class="footer">
+          <p><strong>📚 PILHA</strong> — Gestão Ágil Acadêmica</p>
+          <p>© 2026 PILHA · UNIPAM. Todos os direitos reservados.</p>
+          <p>Este é um e-mail automático. Por favor, não responda diretamente a esta mensagem.</p>
+        </td></tr>
+        <tr><td class="footer-line">&nbsp;</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
         await mailTransporter.sendMail({
-          from: process.env.SMTP_FROM || "PILHA <no-reply@pilha.local>",
+          from: process.env.SMTP_FROM || "PILHA <no-reply@eusford.com>",
           to: email,
-          subject: "Convite para participar de projeto no PILHA",
-          text: `Você foi convidado para um projeto no PILHA.\nAcesse e aceite: ${inviteLink}`
+          subject: `${poName} te convidou para um projeto no PILHA 🚀`,
+          html,
+          text: `Olá ${recipientName}! ${poName} te convidou para participar de um projeto no PILHA.\nAcesse e participe: ${inviteLink}`
         });
       } catch (err) {
         console.error(`[MAIL_ERROR] ${email}: ${err.message}`);
@@ -305,6 +452,12 @@ function authRequired(req, res, next) {
   if (!token) return res.status(401).json({ error: "Não autenticado" });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
+    // Sessão legada sem cookie CSRF — gera um (mantém GET funcional; próximas mutações terão CSRF válido)
+    if (!req.cookies[CSRF_COOKIE]) {
+      const csrfToken = crypto.randomBytes(32).toString("hex");
+      const cookieOpts = { sameSite: "lax", secure: process.env.NODE_ENV === "production", maxAge: 12 * 60 * 60 * 1000, httpOnly: false };
+      res.cookie(CSRF_COOKIE, csrfToken, cookieOpts);
+    }
     return next();
   } catch (_) {
     return res.status(401).json({ error: "Sessão inválida" });
@@ -334,9 +487,27 @@ async function createApp(dbOverride, evalDbOverride) {
   const evalDb = evalDbOverride || await initEvalDb();
   const app = express();
 
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc:     ["'self'"],
+        scriptSrc:      ["'self'"],
+        styleSrc:       ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc:        ["'self'", "https://fonts.gstatic.com"],
+        imgSrc:         ["'self'", "data:"],
+        connectSrc:     ["'self'", "ws:", "wss:"],
+        objectSrc:      ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri:        ["'self'"],
+        formAction:     ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  }));
   app.use(express.json({ limit: "5mb" }));
   app.use(cookieParser());
   app.disable("x-powered-by");
+  app.use(csrfProtect);
 
   const HTML_PARTS = ['shell-top','nav','dashboard','projects','scrum','kanban','documents','turmas','chat','equipes','avaliacao','admin','modals','shell-bottom'];
   const _fs = require("fs");
@@ -384,7 +555,18 @@ async function createApp(dbOverride, evalDbOverride) {
       }
     }
     if (!user) return res.status(401).json({ error: "Credenciais inválidas" });
-    if (!bcrypt.compareSync(String(password), user.password_hash)) return res.status(401).json({ error: "Credenciais inválidas" });
+    const { valid: _loginValid, needsRehash: _loginNeedsRehash } = await verifyPassword(password, user.password_hash);
+    if (!_loginValid) return res.status(401).json({ error: "Credenciais inválidas" });
+    if (_loginNeedsRehash) await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [await hashPassword(password), user.id]);
+    // TOTP for professors — send requiresTOTP/requiresTotpSetup, don't issue JWT yet
+    if (user.role === "professor" && user.is_admin === 0 && process.env.NODE_ENV !== "test") {
+      if (user.totp_enabled) {
+        return res.json({ requiresTOTP: true, userId: user.id });
+      } else {
+        const tempToken = jwt.sign({ userId: user.id, scope: "totp-setup" }, JWT_SECRET, { expiresIn: "10m" });
+        return res.json({ requiresTotpSetup: true, userId: user.id, tempToken });
+      }
+    }
     // 2FA for ADM (is_admin=1) and SUPER (is_admin>=2) — send OTP email, don't issue JWT yet
     const _no2fa = (process.env.NO_2FA_USERNAMES || "").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
     if (user.is_admin >= 1 && process.env.NODE_ENV !== "test" && !_no2fa.includes(user.username.toUpperCase())) {
@@ -450,7 +632,7 @@ async function createApp(dbOverride, evalDbOverride) {
       return res.status(409).json({ error: "E-mail já cadastrado" });
     }
 
-    const passwordHash = bcrypt.hashSync(String(password), 10);
+    const passwordHash = await hashPassword(password);
     const onboardingDone = cleanRole === "aluno" ? 0 : 1;
     const result = await db.run(
       "INSERT INTO users (username, name, role, email, turma, periodo, curso, onboarding_done, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -479,7 +661,7 @@ async function createApp(dbOverride, evalDbOverride) {
     const resetUrl = `${process.env.APP_URL || "https://eusford.com"}/?reset=${token}`;
     if (mailTransporter) {
       await mailTransporter.sendMail({
-        from: process.env.EMAIL_FROM || "PILHA <noreply@eusford.com>",
+        from: process.env.SMTP_FROM || process.env.EMAIL_FROM || "PILHA <no-reply@eusford.com>",
         to: user.email,
         subject: "Recuperação de senha — PILHA",
         html: `
@@ -506,7 +688,7 @@ async function createApp(dbOverride, evalDbOverride) {
       [token]
     );
     if (!record) return res.status(400).json({ error: "Link inválido ou expirado" });
-    const hash = bcrypt.hashSync(String(newPassword), 10);
+    const hash = await hashPassword(newPassword);
     await db.run("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", [hash, record.user_id]);
     await db.run("UPDATE password_reset_tokens SET used = 1 WHERE id = ?", [record.id]);
     res.json({ ok: true });
@@ -525,7 +707,7 @@ async function createApp(dbOverride, evalDbOverride) {
     await db.run("INSERT INTO otp_codes (user_id, code, expires_at) VALUES (?, ?, ?)", [user.id, code, expires]);
     if (mailTransporter) {
       await mailTransporter.sendMail({
-        from: process.env.EMAIL_FROM || "PILHA <noreply@eusford.com>",
+        from: process.env.SMTP_FROM || process.env.EMAIL_FROM || "PILHA <no-reply@eusford.com>",
         to: user.email,
         subject: "Código de verificação — PILHA",
         html: `
@@ -563,12 +745,109 @@ async function createApp(dbOverride, evalDbOverride) {
     res.json({ user: payload });
   });
 
+  // ── TOTP — Google Authenticator para professores ────────
+  function totpSetupAuth(req, res, next) {
+    const header = req.headers["authorization"] || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Token de configuração ausente" });
+    try {
+      const payload = jwt.verify(token, JWT_SECRET);
+      if (payload.scope !== "totp-setup") throw new Error("scope inválido");
+      req.totpUserId = payload.userId;
+      next();
+    } catch (_) {
+      return res.status(401).json({ error: "Token de configuração inválido ou expirado" });
+    }
+  }
+
+  app.get("/api/auth/totp/setup", totpSetupAuth, async (req, res) => {
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [req.totpUserId]);
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
+    if (user.totp_enabled) return res.status(400).json({ error: "TOTP já está ativo" });
+
+    const secret = speakeasy.generateSecret({ name: `PILHA (${sanitize(user.email || user.username)})`, length: 20 });
+    await db.run("UPDATE users SET totp_secret = ? WHERE id = ?", [secret.base32, user.id]);
+
+    const qrDataUrl = await QRCode.toDataURL(secret.otpauth_url);
+    return res.json({ secret: secret.base32, qrDataUrl });
+  });
+
+  app.post("/api/auth/totp/activate", totpSetupAuth, async (req, res) => {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: "Código obrigatório" });
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [req.totpUserId]);
+    if (!user || !user.totp_secret) return res.status(400).json({ error: "Configure o TOTP primeiro" });
+    if (user.totp_enabled) return res.status(400).json({ error: "TOTP já está ativo" });
+
+    const valid = speakeasy.totp.verify({ secret: user.totp_secret, encoding: "base32", token: String(code).trim(), window: 1 });
+    if (!valid) return res.status(401).json({ error: "Código inválido" });
+
+    // Gera 8 recovery codes, hasheia e salva
+    const recoveryCodes = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString("hex").toUpperCase().match(/.{1,5}/g).join("-"));
+    await db.run("DELETE FROM totp_recovery_codes WHERE user_id = ?", [user.id]);
+    for (const code of recoveryCodes) {
+      const codeHash = crypto.createHash("sha256").update(code).digest("hex");
+      await db.run("INSERT INTO totp_recovery_codes (user_id, code_hash) VALUES (?, ?)", [user.id, codeHash]);
+    }
+
+    await db.run("UPDATE users SET totp_enabled = 1 WHERE id = ?", [user.id]);
+    const updatedUser = await db.get("SELECT * FROM users WHERE id = ?", [user.id]);
+    const payload = buildAuthPayload(updatedUser);
+    setAuthCookie(res, payload);
+    await db.run(
+      "INSERT INTO access_logs (user_id, username, name, role, is_admin, ip) VALUES (?, ?, ?, ?, ?, ?)",
+      [user.id, user.username, user.name, user.role, user.is_admin, "TOTP-setup"]
+    );
+    return res.json({ ok: true, user: payload, recoveryCodes });
+  });
+
+  app.post("/api/auth/totp/verify", async (req, res) => {
+    const { userId, code } = req.body || {};
+    if (!userId || !code) return res.status(400).json({ error: "userId e code obrigatórios" });
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [Number(userId)]);
+    if (!user || !user.totp_enabled || !user.totp_secret) return res.status(401).json({ error: "TOTP não configurado" });
+
+    const valid = speakeasy.totp.verify({ secret: user.totp_secret, encoding: "base32", token: String(code).trim(), window: 1 });
+    if (!valid) return res.status(401).json({ error: "Código inválido ou expirado" });
+
+    const payload = buildAuthPayload(user);
+    setAuthCookie(res, payload);
+    await db.run(
+      "INSERT INTO access_logs (user_id, username, name, role, is_admin, ip) VALUES (?, ?, ?, ?, ?, ?)",
+      [user.id, user.username, user.name, user.role, user.is_admin, "TOTP-verified"]
+    );
+    return res.json({ user: payload });
+  });
+
+  app.post("/api/auth/totp/recovery", async (req, res) => {
+    const { userId, recoveryCode } = req.body || {};
+    if (!userId || !recoveryCode) return res.status(400).json({ error: "userId e recoveryCode obrigatórios" });
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [Number(userId)]);
+    if (!user || !user.totp_enabled) return res.status(401).json({ error: "TOTP não configurado" });
+
+    const codeHash = crypto.createHash("sha256").update(String(recoveryCode).trim().toUpperCase()).digest("hex");
+    const record = await db.get(
+      "SELECT * FROM totp_recovery_codes WHERE user_id = ? AND code_hash = ? AND used = 0",
+      [user.id, codeHash]
+    );
+    if (!record) return res.status(401).json({ error: "Código de recuperação inválido ou já utilizado" });
+
+    await db.run("UPDATE totp_recovery_codes SET used = 1 WHERE id = ?", [record.id]);
+    const payload = buildAuthPayload(user);
+    setAuthCookie(res, payload);
+    await db.run(
+      "INSERT INTO access_logs (user_id, username, name, role, is_admin, ip) VALUES (?, ?, ?, ?, ?, ?)",
+      [user.id, user.username, user.name, user.role, user.is_admin, "TOTP-recovery"]
+    );
+    return res.json({ user: payload });
+  });
+
   app.post("/api/auth/change-password", authRequired, async (req, res) => {
     const { newPassword } = req.body || {};
     if (!newPassword) return res.status(400).json({ error: "Nova senha é obrigatória" });
     const _pwErrChange = validatePasswordStrength(newPassword);
     if (_pwErrChange) return res.status(400).json({ error: _pwErrChange });
-    const hash = bcrypt.hashSync(String(newPassword), 10);
+    const hash = await hashPassword(newPassword);
     await db.run("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", [hash, req.user.id]);
     return res.json({ ok: true });
   });
@@ -576,31 +855,17 @@ async function createApp(dbOverride, evalDbOverride) {
   app.post("/api/auth/student-onboarding", authRequired, async (req, res) => {
     if (req.user.role !== "aluno") return res.status(403).json({ error: "Onboarding permitido apenas para aluno" });
 
-    const { email, password, confirmPassword, photo, turma, periodo, curso, mode, projectName, projectDeadline, scrumRole, inviteEmails, inviteToken } = req.body || {};
-    const cleanEmail = String(email || "").trim().toLowerCase();
-    const cleanPassword = String(password || "");
-    const cleanConfirm = String(confirmPassword || "");
-    // turma/período/curso podem vir do body ou já estar no user (cadastro via link)
+    const { photo, mode, scrumRole, inviteEmails, inviteToken } = req.body || {};
     const dbUser = await db.get("SELECT * FROM users WHERE id = ?", [req.user.id]);
-    const cleanTurma = String(turma || dbUser?.turma || "").trim();
-    const cleanPeriodo = String(periodo || dbUser?.periodo || "").trim();
-    const cleanCurso = String(curso || dbUser?.curso || "").trim() || null;
+    const cleanTurma = dbUser?.turma || "";
+    const cleanPeriodo = dbUser?.periodo || "";
+    const cleanCurso = dbUser?.curso || null;
     const cleanMode = String(mode || "create");
     const cleanPhoto = sanitizePhotoDataUrl(photo);
     if (cleanPhoto && typeof cleanPhoto === "object" && cleanPhoto.error) {
       return res.status(400).json({ error: cleanPhoto.error });
     }
 
-    if (!cleanEmail || !cleanPassword || !cleanConfirm) return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
-    if (cleanPassword !== cleanConfirm) return res.status(400).json({ error: "As senhas não coincidem" });
-    const _pwErrOnboarding = validatePasswordStrength(cleanPassword);
-    if (_pwErrOnboarding) return res.status(400).json({ error: _pwErrOnboarding });
-
-    if (await db.get("SELECT id FROM users WHERE email = ? AND id <> ?", [cleanEmail, req.user.id])) {
-      return res.status(409).json({ error: "E-mail já está em uso" });
-    }
-
-    const newHash = bcrypt.hashSync(cleanPassword, 10);
     let createdInvites = 0;
 
     if (cleanMode === "join") {
@@ -608,24 +873,25 @@ async function createApp(dbOverride, evalDbOverride) {
       if (!cleanToken) return res.status(400).json({ error: "Token de convite inválido" });
       const invite = await db.get("SELECT * FROM project_invites WHERE invite_token = ? AND status = 'pending'", [cleanToken]);
       if (!invite) return res.status(404).json({ error: "Convite não encontrado ou expirado" });
-      if (String(invite.invite_email).toLowerCase() !== cleanEmail) {
+      if (dbUser?.email && String(invite.invite_email).toLowerCase() !== dbUser.email.toLowerCase()) {
         return res.status(403).json({ error: `Este convite foi enviado para: ${invite.invite_email}` });
       }
-      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [invite.project_id, req.user.name]);
+      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, 'Development Team')", [invite.project_id, req.user.name]);
       await db.run("UPDATE project_invites SET status = 'accepted', accepted_at = ? WHERE id = ?", [new Date().toISOString(), invite.id]);
     } else {
-      const cleanProjectName = String(projectName || "").trim();
-      const cleanDeadline = String(projectDeadline || "").trim();
-      const cleanScrumRole = VALID_SCRUM_ROLES.includes(String(scrumRole || "")) ? String(scrumRole) : "Development Team";
-      if (!cleanProjectName || !cleanDeadline) return res.status(400).json({ error: "Nome do projeto e prazo são obrigatórios" });
-      const created = await db.run("INSERT INTO projects (name, team, deadline) VALUES (?, ?, ?)", [cleanProjectName, cleanTurma, cleanDeadline]);
+      const cleanScrumRole = VALID_SCRUM_ROLES.includes(String(scrumRole || "")) ? String(scrumRole) : "Product Owner";
+      // Nome provisório — PO define o nome definitivo na aba de projetos
+      const defaultName = `Projeto de ${sanitize(req.user.name || "Aluno")}`;
+      // Prazo provisório — professor ajusta depois
+      const defaultDeadline = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const created = await db.run("INSERT INTO projects (name, team, deadline) VALUES (?, ?, ?)", [defaultName, cleanTurma, defaultDeadline]);
       await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, ?)", [created.lastID, req.user.name, cleanScrumRole]);
       createdInvites = await createAndSendInvites(db, { projectId: created.lastID, inviterUserId: req.user.id, inviteEmails: Array.isArray(inviteEmails) ? inviteEmails : [] });
     }
 
     await db.run(
-      "UPDATE users SET email = ?, onboarding_done = 1, password_hash = ?, turma = ?, periodo = ?, curso = ?, photo = ? WHERE id = ?",
-      [cleanEmail, newHash, cleanTurma, cleanPeriodo, cleanCurso, cleanPhoto, req.user.id]
+      "UPDATE users SET onboarding_done = 1, turma = ?, periodo = ?, curso = ?, photo = ? WHERE id = ?",
+      [cleanTurma, cleanPeriodo, cleanCurso, cleanPhoto, req.user.id]
     );
 
     const updatedUser = await db.get("SELECT * FROM users WHERE id = ?", [req.user.id]);
@@ -639,6 +905,7 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.post("/api/auth/logout", (_req, res) => {
     res.clearCookie(TOKEN_COOKIE);
+    res.clearCookie(CSRF_COOKIE);
     return res.json({ ok: true });
   });
 
@@ -680,14 +947,25 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!req.user.email || req.user.email.toLowerCase() !== String(invite.invite_email).toLowerCase()) {
       return res.status(403).json({ error: "Este convite pertence a outro e-mail" });
     }
-    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [invite.project_id, req.user.name]);
+    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, 'Development Team')", [invite.project_id, req.user.name]);
     await db.run("UPDATE project_invites SET status = 'accepted', accepted_at = ? WHERE id = ?", [new Date().toISOString(), invite.id]);
     return res.json({ ok: true });
   });
 
   // ── Students / Profile ────────────────────────────────────────────────────
 
-  app.get("/api/students", authRequired, async (_req, res) => {
+  app.get("/api/students", authRequired, async (req, res) => {
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      const myTurmas = await db.all("SELECT id FROM turmas WHERE professor_id = ?", [req.user.id]);
+      if (myTurmas.length === 0) return res.json([]);
+      const ids = myTurmas.map(t => t.id);
+      const placeholders = ids.map(() => "?").join(",");
+      const students = await db.all(
+        `SELECT id, name, turma, periodo, photo FROM users WHERE role = 'aluno' AND turma_id IN (${placeholders}) ORDER BY name`,
+        ids
+      );
+      return res.json(students);
+    }
     const students = await db.all("SELECT id, name, turma, periodo, photo FROM users WHERE role = 'aluno' ORDER BY name");
     return res.json(students);
   });
@@ -757,7 +1035,7 @@ async function createApp(dbOverride, evalDbOverride) {
     return res.status(201).json({ id: String(created.lastID) });
   });
 
-  // Atualiza nome/descrição do projeto (professor, admin ou PO do projeto)
+  // Atualiza nome/descrição do projeto (professor, admin ou PO — PO não pode alterar nome após confirmação)
   app.patch("/api/projects/:id", authRequired, async (req, res) => {
     const projectId = Number(req.params.id);
     if (!projectId) return res.status(400).json({ error: "ID inválido" });
@@ -768,6 +1046,11 @@ async function createApp(dbOverride, evalDbOverride) {
         [projectId, req.user.name]
       );
       if (!poRow) return res.status(403).json({ error: "Sem permissão" });
+      // PO não pode alterar nome se já foi confirmado — somente professor pode
+      const proj = await db.get("SELECT name_confirmed FROM projects WHERE id = ?", [projectId]);
+      if (proj?.name_confirmed && req.body?.name !== undefined) {
+        return res.status(403).json({ error: "Nome já confirmado. Somente o professor pode alterá-lo." });
+      }
     }
     const { name, description } = req.body || {};
     const updates = [];
@@ -778,6 +1061,37 @@ async function createApp(dbOverride, evalDbOverride) {
     vals.push(projectId);
     await db.run(`UPDATE projects SET ${updates.join(", ")} WHERE id = ?`, vals);
     return res.json({ ok: true });
+  });
+
+  // PO confirma o nome definitivo do projeto (após isso só professor pode mudar)
+  app.post("/api/projects/:id/confirm-name", authRequired, async (req, res) => {
+    const projectId = Number(req.params.id);
+    if (!projectId) return res.status(400).json({ error: "ID inválido" });
+    const poRow = await db.get(
+      "SELECT * FROM project_members WHERE project_id = ? AND member_name = ? AND scrum_role = 'Product Owner'",
+      [projectId, req.user.name]
+    );
+    if (!poRow && !req.user.isAdmin && req.user.role !== "professor") {
+      return res.status(403).json({ error: "Apenas o Product Owner pode confirmar o nome" });
+    }
+    const name = sanitize(String(req.body?.name || "").trim());
+    if (!name) return res.status(400).json({ error: "Nome inválido" });
+    await db.run("UPDATE projects SET name = ?, name_confirmed = 1 WHERE id = ?", [name, projectId]);
+    return res.json({ ok: true });
+  });
+
+  // Professor/admin alterna liberação de TAP/PI para alunos do projeto
+  app.patch("/api/projects/:id/unlock-docs", authRequired, async (req, res) => {
+    if (!req.user.isAdmin && req.user.role !== "professor") {
+      return res.status(403).json({ error: "Apenas professores podem liberar documentos" });
+    }
+    const projectId = Number(req.params.id);
+    if (!projectId) return res.status(400).json({ error: "ID inválido" });
+    const proj = await db.get("SELECT docs_unlocked FROM projects WHERE id = ?", [projectId]);
+    if (!proj) return res.status(404).json({ error: "Projeto não encontrado" });
+    const newVal = proj.docs_unlocked ? 0 : 1;
+    await db.run("UPDATE projects SET docs_unlocked = ? WHERE id = ?", [newVal, projectId]);
+    return res.json({ ok: true, docsUnlocked: newVal === 1 });
   });
 
   // Update a member's Scrum role (professor, admin, or PO of the project)
@@ -798,7 +1112,7 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!VALID_ROLES_WITH_NULL.includes(newRole)) {
       return res.status(400).json({ error: "Papel inválido" });
     }
-    const dbRole = newRole === "sem_papel" ? null : newRole;
+    const dbRole = newRole === "sem_papel" ? "Development Team" : newRole;
     const row = await db.get("SELECT * FROM project_members WHERE project_id = ? AND member_name = ?", [projectId, memberName]);
     if (!row) return res.status(404).json({ error: "Membro não encontrado neste projeto" });
     await db.run("UPDATE project_members SET scrum_role = ? WHERE project_id = ? AND member_name = ?", [dbRole, projectId, memberName]);
@@ -842,7 +1156,7 @@ async function createApp(dbOverride, evalDbOverride) {
     if (user.role !== "aluno" && !isProfOrAdmin) return res.status(400).json({ error: "Usuário não é aluno" });
     const existing = await db.get("SELECT * FROM project_members WHERE project_id = ? AND member_name = ?", [projectId, user.name]);
     if (existing) return res.status(409).json({ error: `${user.name} já está no projeto` });
-    await db.run("INSERT INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [projectId, user.name]);
+    await db.run("INSERT INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, 'Development Team')", [projectId, user.name]);
     res.status(201).json({ ok: true, name: user.name });
   });
 
@@ -1191,6 +1505,10 @@ async function createApp(dbOverride, evalDbOverride) {
   // Export por turma (todos os grupos da turma)
   app.get("/api/export/grading/turma/:turma", authRequired, professorOnly, async (req, res) => {
     const turma = decodeURIComponent(req.params.turma);
+    if (!req.user.isAdmin) {
+      const owns = await db.get("SELECT 1 FROM turmas WHERE turma = ? AND professor_id = ?", [turma, req.user.id]);
+      if (!owns) return res.status(403).json({ error: "Sem permissão" });
+    }
     const projects = await getProjectsWithMembers(db, "WHERE p.team = ?", [turma]);
     if (!projects.length) return res.status(404).json({ error: "Nenhum projeto encontrado para esta turma" });
     const wb = await buildGradingWorkbook(projects, evalDb, turma);
@@ -1583,7 +1901,7 @@ async function createApp(dbOverride, evalDbOverride) {
     if (await db.get("SELECT id FROM users WHERE email = ?", [cleanEmail]))
       return res.status(409).json({ error: "E-mail já cadastrado" });
 
-    const hash = bcrypt.hashSync(String(password), 10);
+    const hash = await hashPassword(password);
     const result = await db.run(
       "INSERT INTO users (username, name, role, email, turma, periodo, curso, turma_id, onboarding_done, password_hash) VALUES (?, ?, 'aluno', ?, ?, ?, ?, ?, 0, ?)",
       [username, cleanName, cleanEmail, turmaRow.turma, turmaRow.periodo, turmaRow.curso, turmaRow.id, hash]
@@ -1616,13 +1934,13 @@ async function createApp(dbOverride, evalDbOverride) {
 
     const cleanName = sanitize(name);
     const username  = sanitizeUsername(cleanEmail.split("@")[0] + "_" + Math.floor(Math.random() * 999));
-    const hash      = bcrypt.hashSync(String(password), 10);
+    const hash      = await hashPassword(password);
 
     const result = await db.run(
       "INSERT INTO users (username, name, role, email, onboarding_done, password_hash) VALUES (?, ?, 'aluno', ?, 1, ?)",
       [username, cleanName, cleanEmail, hash]
     );
-    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [invite.project_id, cleanName]);
+    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, 'Development Team')", [invite.project_id, cleanName]);
     await db.run("UPDATE project_invites SET status = 'accepted', accepted_at = ? WHERE id = ?", [new Date().toISOString(), invite.id]);
 
     const user = await db.get("SELECT * FROM users WHERE id = ?", [result.lastID]);
@@ -1636,8 +1954,10 @@ async function createApp(dbOverride, evalDbOverride) {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
     const user = await db.get("SELECT * FROM users WHERE email = ?", [String(email).trim().toLowerCase()]);
-    if (!user || !bcrypt.compareSync(String(password), user.password_hash))
-      return res.status(401).json({ error: "Credenciais inválidas" });
+    if (!user) return res.status(401).json({ error: "Credenciais inválidas" });
+    const { valid: _leValid, needsRehash: _leNeedsRehash } = await verifyPassword(password, user.password_hash);
+    if (!_leValid) return res.status(401).json({ error: "Credenciais inválidas" });
+    if (_leNeedsRehash) await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [await hashPassword(password), user.id]);
     if (user.must_change_password)
       return res.json({ mustChangePassword: true, userId: user.id });
     const payload = buildAuthPayload(user);
@@ -1700,6 +2020,8 @@ async function createApp(dbOverride, evalDbOverride) {
     const turmaId = Number(req.params.turmaId);
     const turma = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
     if (!turma) return res.status(404).json({ error: "Turma não encontrada" });
+    if (req.user.role === "professor" && !req.user.isAdmin && turma.professor_id !== req.user.id)
+      return res.status(403).json({ error: "Sem permissão" });
     const members = await db.all(
       `SELECT u.id, u.name, u.role, u.email, u.turma, u.periodo, u.curso, u.photo,
               u.bio, u.skills, u.graduations, u.specialty, u.experience_years, u.profile_complete,
@@ -1723,9 +2045,10 @@ async function createApp(dbOverride, evalDbOverride) {
     const { section, name, max_pts } = req.body || {};
     if (!["planejamento", "desenvolvimento"].includes(section) || !name)
       return res.status(400).json({ error: "Dados inválidos" });
-    // Busca todos projetos da turma
-    const turma = await db.get("SELECT turma FROM turmas WHERE id = ?", [turmaId]);
+    const turma = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
     if (!turma) return res.status(404).json({ error: "Turma não encontrada" });
+    if (!req.user.isAdmin && turma.professor_id !== req.user.id)
+      return res.status(403).json({ error: "Sem permissão" });
     const projects = await db.all("SELECT id FROM projects WHERE team LIKE ?", [`%${turma.turma}%`]);
     const ids = [];
     for (const proj of projects) {
@@ -1779,7 +2102,7 @@ async function createApp(dbOverride, evalDbOverride) {
       const prefixLength = Math.max(1, 49 - suffix.length);
       username = sanitizeUsername(`${baseUsername.slice(0, prefixLength)}.${suffix}`);
     }
-    const passwordHash = bcrypt.hashSync(cleanPassword, 10);
+    const passwordHash = await hashPassword(cleanPassword);
     const created = await db.run(
       "INSERT INTO users (username, name, role, email, is_admin, onboarding_done, must_change_password, password_hash) VALUES (?, ?, 'professor', ?, 0, 1, 1, ?)",
       [username, cleanName, cleanEmail, passwordHash]
@@ -1830,7 +2153,7 @@ async function createApp(dbOverride, evalDbOverride) {
 </table></td></tr></table>
 </body></html>`;
       mailTransporter.sendMail({
-        from: process.env.EMAIL_FROM || "PILHA <noreply@eusford.com>",
+        from: process.env.SMTP_FROM || process.env.EMAIL_FROM || "PILHA <no-reply@eusford.com>",
         to: cleanEmail,
         subject: "Bem-vindo ao PILHA — Seus dados de acesso",
         html: welcomeHtml
@@ -1914,12 +2237,19 @@ async function createApp(dbOverride, evalDbOverride) {
 
   // ── Evaluation (professor only) ───────────────────────────────────────────
 
-  app.get("/api/eval", authRequired, professorOnly, async (_req, res) => {
-    const activities = await evalDb.all("SELECT * FROM eval_activities ORDER BY project_id, section, id");
-    const activityScores = await evalDb.all("SELECT * FROM eval_activity_scores");
-    const individual = await evalDb.all("SELECT * FROM eval_individual");
-    const meta = await evalDb.all("SELECT * FROM eval_meta");
-    const photoRows = await db.all("SELECT name, photo FROM users WHERE photo IS NOT NULL AND photo != ''");
+  app.get("/api/eval", authRequired, professorOnly, async (req, res) => {
+    const scope = await buildVisibleScope(db, req.user);
+    const ids = [...scope.projectIds];
+    if (ids.length === 0) return res.json({ activities: [], activityScores: [], individual: [], meta: [], memberPhotos: {} });
+    const ph = ids.map(() => "?").join(",");
+    const activities    = await evalDb.all(`SELECT * FROM eval_activities WHERE project_id IN (${ph}) ORDER BY project_id, section, id`, ids);
+    const actIds        = activities.map(a => a.id);
+    const activityScores = actIds.length
+      ? await evalDb.all(`SELECT * FROM eval_activity_scores WHERE activity_id IN (${actIds.map(() => "?").join(",")})`, actIds)
+      : [];
+    const individual = await evalDb.all(`SELECT * FROM eval_individual WHERE project_id IN (${ph})`, ids);
+    const meta       = await evalDb.all(`SELECT * FROM eval_meta WHERE project_id IN (${ph})`, ids);
+    const photoRows  = await db.all("SELECT name, photo FROM users WHERE photo IS NOT NULL AND photo != ''");
     const memberPhotos = {};
     for (const row of photoRows) memberPhotos[row.name] = row.photo;
     return res.json({ activities, activityScores, individual, meta, memberPhotos });
@@ -1930,6 +2260,8 @@ async function createApp(dbOverride, evalDbOverride) {
     const { section, name, max_pts } = req.body || {};
     if (!["planejamento", "desenvolvimento"].includes(section)) return res.status(400).json({ error: "Seção inválida" });
     if (!name || !String(name).trim()) return res.status(400).json({ error: "Nome obrigatório" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Sem permissão" });
     const maxPts = Math.max(0, Number(max_pts) || 0);
     const created = await evalDb.run(
       "INSERT INTO eval_activities (project_id, section, name, max_pts, score) VALUES (?, ?, ?, ?, 0)",
@@ -1940,8 +2272,10 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.patch("/api/eval/activities/:actId", authRequired, professorOnly, async (req, res) => {
     const { name, max_pts } = req.body || {};
-    const act = await evalDb.get("SELECT id FROM eval_activities WHERE id = ?", [req.params.actId]);
+    const act = await evalDb.get("SELECT id, project_id FROM eval_activities WHERE id = ?", [req.params.actId]);
     if (!act) return res.status(404).json({ error: "Atividade não encontrada" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, act.project_id))
+      return res.status(403).json({ error: "Sem permissão" });
     if (name !== undefined) await evalDb.run("UPDATE eval_activities SET name = ? WHERE id = ?", [String(name).trim(), req.params.actId]);
     if (max_pts !== undefined) await evalDb.run("UPDATE eval_activities SET max_pts = ? WHERE id = ?", [Math.max(0, Number(max_pts) || 0), req.params.actId]);
     return res.json({ ok: true });
@@ -1951,6 +2285,10 @@ async function createApp(dbOverride, evalDbOverride) {
     const { member_name, score } = req.body || {};
     if (!member_name) return res.status(400).json({ error: "member_name obrigatório" });
     const actId = Number(req.params.actId);
+    const _actOwn = await evalDb.get("SELECT project_id FROM eval_activities WHERE id = ?", [actId]);
+    if (!_actOwn) return res.status(404).json({ error: "Atividade não encontrada" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, _actOwn.project_id))
+      return res.status(403).json({ error: "Sem permissão" });
     const cleanScore = Math.max(0, Number(score) || 0);
     const existing = await evalDb.get("SELECT activity_id FROM eval_activity_scores WHERE activity_id = ? AND member_name = ?", [actId, member_name]);
     if (!existing) {
@@ -1962,12 +2300,18 @@ async function createApp(dbOverride, evalDbOverride) {
   });
 
   app.delete("/api/eval/activities/:actId", authRequired, professorOnly, async (req, res) => {
+    const _actDel = await evalDb.get("SELECT project_id FROM eval_activities WHERE id = ?", [req.params.actId]);
+    if (!_actDel) return res.status(404).json({ error: "Atividade não encontrada" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, _actDel.project_id))
+      return res.status(403).json({ error: "Sem permissão" });
     await evalDb.run("DELETE FROM eval_activities WHERE id = ?", [req.params.actId]);
     return res.json({ ok: true });
   });
 
   app.patch("/api/eval/:projectId/meta", authRequired, professorOnly, async (req, res) => {
     const projectId = Number(req.params.projectId);
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Sem permissão" });
     const { entrega_score, observacoes } = req.body || {};
     const existing = await evalDb.get("SELECT project_id FROM eval_meta WHERE project_id = ?", [projectId]);
     if (!existing) {
