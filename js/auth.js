@@ -208,6 +208,8 @@ async function tryAcceptInviteFromUrl() {
 
 // ── Auth form listeners ───────────────────────────────────
 let _pending2FAUserId = null;
+let _pendingTotpUserId = null;
+let _pendingTotpSetupToken = null;
 const LOGIN_EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 loginForm.addEventListener("submit", async (event) => {
@@ -225,7 +227,24 @@ loginForm.addEventListener("submit", async (event) => {
       body: JSON.stringify({ identifier: normalizedIdentifier, password })
     });
 
-    // 2FA required
+    // TOTP: professor sem TOTP configurado — precisa configurar agora
+    if (response.requiresTotpSetup) {
+      _pendingTotpSetupToken = response.tempToken;
+      _pendingTotpUserId = response.userId;
+      await loadTotpSetup();
+      return;
+    }
+
+    // TOTP: professor com TOTP já configurado
+    if (response.requiresTOTP) {
+      _pendingTotpUserId = response.userId;
+      const codeInput = document.getElementById("totp-verify-code");
+      if (codeInput) codeInput.value = "";
+      setAuthView("totp-verify");
+      return;
+    }
+
+    // 2FA required (ADM/SUPER — OTP por email)
     if (response.requires2FA) {
       _pending2FAUserId = response.userId;
       const desc = document.getElementById("2fa-desc");
@@ -267,6 +286,113 @@ if (otpForm) {
       }
     } catch (err) {
       if (otpError) otpError.textContent = err.message;
+    }
+  });
+}
+
+// ── TOTP setup (professores) ──────────────────────────────
+async function loadTotpSetup() {
+  try {
+    const data = await fetch("/api/auth/totp/setup", {
+      headers: { "Authorization": `Bearer ${_pendingTotpSetupToken}` }
+    });
+    if (!data.ok) { const err = await data.json(); throw new Error(err.error || "Erro ao carregar QR Code"); }
+    const { qrDataUrl, secret } = await data.json();
+    const img = document.getElementById("totp-qr-img");
+    const secretEl = document.getElementById("totp-secret-text");
+    if (img) img.src = qrDataUrl;
+    if (secretEl) secretEl.textContent = secret;
+    const codeInput = document.getElementById("totp-setup-code");
+    if (codeInput) codeInput.value = "";
+    const errEl = document.getElementById("totp-setup-error");
+    if (errEl) errEl.textContent = "";
+    setAuthView("totp-setup");
+  } catch (err) {
+    loginError.textContent = err.message;
+  }
+}
+
+const totpSetupForm = document.querySelector("#totp-setup-form");
+if (totpSetupForm) {
+  totpSetupForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const code = String(new FormData(totpSetupForm).get("code") || "").trim();
+    const errEl = document.getElementById("totp-setup-error");
+    try {
+      const data = await fetch("/api/auth/totp/activate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${_pendingTotpSetupToken}` },
+        body: JSON.stringify({ code })
+      });
+      if (!data.ok) { const err = await data.json(); throw new Error(err.error || "Código inválido"); }
+      const response = await data.json();
+      _pendingTotpSetupToken = null;
+      _pendingTotpUserId = null;
+      // Exibe códigos de recuperação antes de entrar no app
+      const list = document.getElementById("totp-recovery-list");
+      if (list && response.recoveryCodes) {
+        list.innerHTML = response.recoveryCodes.map(c => `<span style="letter-spacing:0.05em;">${escapeHtml(c)}</span>`).join("");
+      }
+      setAuthView("totp-recovery-codes");
+      const doneBtn = document.getElementById("totp-recovery-done-btn");
+      if (doneBtn) {
+        doneBtn.onclick = async () => {
+          clearAuthFeedback();
+          await setSession(response.user);
+        };
+      }
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message;
+    }
+  });
+}
+
+// ── TOTP verify (login com TOTP já configurado) ───────────
+const totpVerifyForm = document.querySelector("#totp-verify-form");
+if (totpVerifyForm) {
+  totpVerifyForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const code = String(new FormData(totpVerifyForm).get("code") || "").trim();
+    const errEl = document.getElementById("totp-verify-error");
+    try {
+      const response = await apiFetch("/api/auth/totp/verify", {
+        method: "POST",
+        body: JSON.stringify({ userId: _pendingTotpUserId, code })
+      });
+      _pendingTotpUserId = null;
+      clearAuthFeedback();
+      await setSession(response.user);
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message;
+    }
+  });
+}
+
+document.querySelector("#totp-use-recovery-btn")?.addEventListener("click", () => {
+  const inp = document.getElementById("totp-recovery-code");
+  if (inp) inp.value = "";
+  const errEl = document.getElementById("totp-recovery-error");
+  if (errEl) errEl.textContent = "";
+  setAuthView("totp-recovery");
+});
+
+// ── TOTP recovery code ────────────────────────────────────
+const totpRecoveryForm = document.querySelector("#totp-recovery-form");
+if (totpRecoveryForm) {
+  totpRecoveryForm.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const recoveryCode = String(new FormData(totpRecoveryForm).get("recoveryCode") || "").trim();
+    const errEl = document.getElementById("totp-recovery-error");
+    try {
+      const response = await apiFetch("/api/auth/totp/recovery", {
+        method: "POST",
+        body: JSON.stringify({ userId: _pendingTotpUserId, recoveryCode })
+      });
+      _pendingTotpUserId = null;
+      clearAuthFeedback();
+      await setSession(response.user);
+    } catch (err) {
+      if (errEl) errEl.textContent = err.message;
     }
   });
 }
@@ -523,34 +649,21 @@ if (onboardingForm) {
     clearAuthFeedback();
     const data = new FormData(onboardingForm);
 
-    const email = String(data.get("email") || "").trim();
-    const password = String(data.get("password") || "");
-    const confirmPassword = String(data.get("confirmPassword") || "");
-    const turma = String(data.get("turma") || "").trim();
-    const periodo = String(data.get("periodo") || "").trim();
     const mode = String(data.get("onboardingMode") || "create");
     const inviteToken = String(data.get("inviteToken") || "").trim();
     const photo = state.pendingPhoto || null;
 
-    if (password !== confirmPassword) { onboardingError.textContent = "As senhas não coincidem"; return; }
-    const _pwErrOnboarding = validatePasswordStrength(password);
-    if (_pwErrOnboarding) { onboardingError.textContent = _pwErrOnboarding; return; }
-
-    const payload = { email, password, confirmPassword, turma, periodo, photo, mode };
+    const payload = { photo, mode };
 
     if (mode === "join") {
       payload.inviteToken = inviteToken;
     } else {
-      const projectName = String(data.get("projectName") || "").trim();
-      const projectDeadline = String(data.get("projectDeadline") || "").trim();
-      const scrumRole = String(data.get("scrumRole") || "Development Team");
+      const scrumRole = String(data.get("scrumRole") || "Product Owner");
       const inviteEmails = String(data.get("inviteEmails") || "")
         .split(",")
         .map((e) => e.trim())
         .filter(Boolean);
 
-      payload.projectName = projectName;
-      payload.projectDeadline = projectDeadline;
       payload.scrumRole = scrumRole;
       payload.inviteEmails = inviteEmails;
     }

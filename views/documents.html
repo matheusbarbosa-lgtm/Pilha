@@ -10,7 +10,7 @@
             <button class="btn-secondary doc-submit-btn" data-doc="tap" id="tap-submit-btn" title="Enviar para aprovação do professor">Enviar para revisão</button>
             <button class="btn-primary doc-approve-btn hidden" data-doc="tap" id="tap-approve-btn">✓ Aprovar</button>
             <button class="btn-danger doc-reject-btn hidden" data-doc="tap" id="tap-reject-btn">✗ Devolver</button>
-            <button class="btn-secondary" id="tap-pdf-btn" title="Exportar como PDF" style="display:none;">⬇ PDF</button>
+            <button class="btn-secondary" id="tap-pdf-btn" title="Imprimir ou exportar como PDF" style="display:none;">PDF / Imprimir</button>
             <button class="btn-icon doc-chat-btn" data-doc="tap" title="Chat de revisão" style="font-size:1.3rem;background:none;border:none;cursor:pointer;">💬</button>
           </div>
         </div>
@@ -18,11 +18,13 @@
         <article class="card doc-form-card">
           <div class="doc-section-title">1 - TAP – TERMO ABERTURA DO PROJETO</div>
           <div class="doc-item"><label class="doc-label">1.1 Nome do projeto</label><textarea class="doc-field large" id="tap-1-1" rows="2"></textarea></div>
-          <div class="doc-item"><label class="doc-label">1.2 Equipe do projeto <small>(ordem alfabética)</small></label>
+          <div class="doc-item doc-team-section" data-doc-team-section="tap"><label class="doc-label">1.2 Equipe do projeto <small>(ordem alfabética)</small></label>
             <input class="doc-field" id="tap-1-2-a" type="text" placeholder="Membro 1" />
             <input class="doc-field" id="tap-1-2-b" type="text" placeholder="Membro 2" />
             <input class="doc-field" id="tap-1-2-c" type="text" placeholder="Membro 3" />
             <input class="doc-field" id="tap-1-2-d" type="text" placeholder="Membro 4" />
+            <div class="doc-extra-students" id="tap-extra-students" data-doc-extra-students="tap"></div>
+            <button class="btn-secondary btn-sm doc-add-student-btn" type="button" data-doc="tap">+ Adicionar aluno</button>
           </div>
           <div class="doc-item"><label class="doc-label">1.3 Empresa do projeto</label><textarea class="doc-field" id="tap-1-3" rows="2"></textarea><p class="doc-obs">Caso o projeto não for desenvolvido para uma empresa deverá ter um profissional da área escolhida para validar as informações.</p></div>
           <div class="doc-item"><label class="doc-label">1.4 Previsão do projeto</label>
@@ -50,7 +52,7 @@
             <button class="btn-secondary doc-submit-btn" data-doc="pi" id="pi-submit-btn">Enviar para revisão</button>
             <button class="btn-primary doc-approve-btn hidden" data-doc="pi" id="pi-approve-btn">✓ Aprovar</button>
             <button class="btn-danger doc-reject-btn hidden" data-doc="pi" id="pi-reject-btn">✗ Devolver</button>
-            <button class="btn-secondary" id="pi-pdf-btn" title="Exportar como PDF" style="display:none;">⬇ PDF</button>
+            <button class="btn-secondary" id="pi-pdf-btn" title="Imprimir ou exportar como PDF" style="display:none;">PDF / Imprimir</button>
             <button class="btn-icon doc-chat-btn" data-doc="pi" title="Chat de revisão" style="font-size:1.3rem;background:none;border:none;cursor:pointer;">💬</button>
           </div>
         </div>
@@ -61,11 +63,13 @@
           <div class="doc-item"><label class="doc-label">Curso</label><input class="doc-field" id="pi-curso" type="text" /></div>
           <div class="doc-item"><label class="doc-label">Disciplina</label><input class="doc-field" id="pi-disciplina" type="text" /></div>
           <div class="doc-item"><label class="doc-label">Professor(a)</label><input class="doc-field" id="pi-professor" type="text" /></div>
-          <div class="doc-item"><label class="doc-label">Autores / Componentes do grupo</label>
+          <div class="doc-item doc-team-section" data-doc-team-section="pi"><label class="doc-label">Autores / Componentes do grupo</label>
             <input class="doc-field" id="pi-autor-a" type="text" placeholder="Nome completo 1" />
             <input class="doc-field" id="pi-autor-b" type="text" placeholder="Nome completo 2" />
             <input class="doc-field" id="pi-autor-c" type="text" placeholder="Nome completo 3" />
             <input class="doc-field" id="pi-autor-d" type="text" placeholder="Nome completo 4" />
+            <div class="doc-extra-students" id="pi-extra-students" data-doc-extra-students="pi"></div>
+            <button class="btn-secondary btn-sm doc-add-student-btn" type="button" data-doc="pi">+ Adicionar aluno</button>
           </div>
           <div class="doc-item"><label class="doc-label">Título do projeto</label><input class="doc-field" id="pi-titulo" type="text" /></div>
           <div class="doc-item"><label class="doc-label">Subtítulo (quando houver)</label><input class="doc-field" id="pi-subtitulo" type="text" /></div>

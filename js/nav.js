@@ -13,6 +13,7 @@ const ROUTE_MAP = {
   "avaliacao":  "/avaliacao",
   "admincmd":   "/admin",
   "superadm":   "/superadmin",
+  "integracoes": "/integracoes",
 };
 const PATH_TO_VIEW = Object.fromEntries(Object.entries(ROUTE_MAP).map(([v, p]) => [p, v]));
 
@@ -39,6 +40,7 @@ function navigateTo(viewId, pushHistory = true) {
   if (viewId === "chat") loadChatTurmaList();
   if (viewId === "avaliacao") renderAvaliacao();
   if (viewId === "superadm") loadSuperAdm();
+  if (viewId === "integracoes" && typeof loadGithubIntegration === "function") loadGithubIntegration();
 
   if (pushHistory) {
     const url = ROUTE_MAP[viewId] || "/dashboard";

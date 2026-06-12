@@ -3,18 +3,24 @@ const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
 const express = require("express");
+const helmet = require("helmet");
 const http = require("http");
 const { Server: SocketServer } = require("socket.io");
 const multer = require("multer");
 const cookieParser = require("cookie-parser");
 const bcrypt = require("bcryptjs");
+const argon2 = require("argon2");
+const speakeasy = require("speakeasy");
+const QRCode = require("qrcode");
 const jwt = require("jsonwebtoken");
 const nodemailer = require("nodemailer");
 let initDb, initEvalDb;
 try {
-  ({ initDb, initEvalDb } = require("./db"));
+  ({ initDb, initEvalDb } = process.env.DATABASE_URL
+    ? require("./db-pg")
+    : require("./db"));
 } catch (_dbLoadErr) {
-  // sqlite3 falhou ao carregar — createApp() vai rejeitar e o servidor de diagnóstico irá capturar
+  // driver de banco falhou ao carregar — createApp() vai rejeitar e o servidor de diagnóstico irá capturar
   initDb = initEvalDb = () => { throw _dbLoadErr; };
 }
 
@@ -31,7 +37,7 @@ const _storage = multer.diskStorage({
 });
 const upload = multer({
   storage: _storage,
-  limits: { fileSize: 300 * 1024 }, // 300KB
+  limits: { fileSize: 80 * 1024 * 1024 }, // 80MB
   fileFilter: (_req, file, cb) => {
     const allowed = ["application/pdf","application/msword",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -44,6 +50,21 @@ const upload = multer({
 
 
 const PORT = process.env.PORT || 3000;
+
+async function hashPassword(password) {
+  return argon2.hash(String(password), { type: argon2.argon2id });
+}
+
+async function verifyPassword(password, hash) {
+  const pw = String(password);
+  if (hash && hash.startsWith("$argon2")) {
+    const valid = await argon2.verify(hash, pw);
+    return { valid, needsRehash: false };
+  }
+  const valid = bcrypt.compareSync(pw, hash);
+  return { valid, needsRehash: valid };
+}
+
 function sanitize(str, maxLen = 300) {
   if (str === null || str === undefined) return "";
   return String(str)
@@ -78,10 +99,14 @@ function readCookieValue(cookieHeader, cookieName) {
     .find((part) => part.startsWith(prefix));
   return match ? decodeURIComponent(match.slice(prefix.length)) : null;
 }
-const JWT_SECRET = process.env.JWT_SECRET || "campusflow_dev_secret_change_me";
-if (!process.env.JWT_SECRET) {
-  console.warn("[SECURITY] JWT_SECRET não definido. Usando secret padrão inseguro. Defina JWT_SECRET em produção.");
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === "production") {
+  console.error("[SECURITY] JWT_SECRET não definido em produção. Encerrando.");
+  process.exit(1);
 }
+const JWT_SECRET = process.env.JWT_SECRET || (process.env.NODE_ENV === "test" ? "test_secret_only" : (() => {
+  console.warn("[SECURITY] JWT_SECRET não definido. Usando secret padrão inseguro. Defina JWT_SECRET em produção.");
+  return "campusflow_dev_secret_change_me";
+})());
 
 // ── Simple in-memory rate limiter ─────────────────────────────────────────────
 function makeRateLimiter(maxAttempts, windowMs, errorMsg) {
@@ -120,6 +145,7 @@ const otpVerifyRateLimit = makeRateLimiter(5, 15 * 60 * 1000, "Muitas tentativas
 // OTP request: 3 envios / 15 min por IP (anti email-bombing)
 const otpRequestRateLimit = makeRateLimiter(3, 15 * 60 * 1000, "Muitas solicitações de código. Aguarde antes de tentar novamente.");
 const TOKEN_COOKIE = "campusflow_token";
+const CSRF_COOKIE  = "csrf_token";
 const VALID_STATUS = ["todo", "doing", "done", "backlog", "nao_iniciado", "em_progresso", "concluido"];
 const VALID_PRIORITY = ["baixa", "normal", "alta", "urgente", "media"];
 const VALID_URGENCY = ["low", "medium", "high"];
@@ -157,12 +183,89 @@ function normalizeTask(row) {
     tags,
     urgency: row.urgency || "medium",
     parentTaskId: row.parent_task_id ? String(row.parent_task_id) : null,
+    githubRepo: row.github_repo || "",
+    githubNote: row.github_note || "",
     customValues: row.customValues || {}
   };
 }
 
 function cleanStatus(value) {
   return String(value || "").toLowerCase();
+}
+
+// Registra um evento no histórico de atividade da tarefa (best-effort).
+async function logTaskAudit(db, taskId, userName, field, oldVal, newVal) {
+  try {
+    await db.run(
+      "INSERT INTO task_audit (task_id, user_name, field, old_val, new_val) VALUES (?,?,?,?,?)",
+      [taskId, userName || "Sistema", field, oldVal == null ? null : String(oldVal), newVal == null ? null : String(newVal)]
+    );
+  } catch (_) { /* histórico é best-effort, nunca quebra a ação principal */ }
+}
+
+// ── GitHub: autenticação do App + API (para estatísticas de contribuição) ──
+// Aceita a private key em 3 formatos: PEM puro, PEM com \n literal, ou base64.
+function normalizeGithubPrivateKey(raw) {
+  let key = String(raw || "").trim();
+  if (!key) return "";
+  if (key.includes("\\n")) key = key.replace(/\\n/g, "\n");
+  if (!key.startsWith("-----BEGIN")) {
+    try {
+      const decoded = Buffer.from(key, "base64").toString("utf8");
+      if (decoded.includes("-----BEGIN")) key = decoded;
+    } catch (_) { /* não é base64 */ }
+  }
+  return key;
+}
+
+function githubAppJwt() {
+  const appId = process.env.GITHUB_APP_ID;
+  const pem = normalizeGithubPrivateKey(process.env.GITHUB_PRIVATE_KEY);
+  if (!appId || !pem) return null;
+  const now = Math.floor(Date.now() / 1000);
+  return jwt.sign({ iat: now - 60, exp: now + 540, iss: String(appId) }, pem, { algorithm: "RS256" });
+}
+
+const _ghTokenCache = new Map(); // installationId -> { token, exp(ms) }
+async function githubInstallationToken(installationId) {
+  if (!installationId) return null;
+  const cached = _ghTokenCache.get(String(installationId));
+  if (cached && cached.exp > Date.now() + 60000) return cached.token;
+  const appJwt = githubAppJwt();
+  if (!appJwt) return null;
+  const res = await fetch(`https://api.github.com/app/installations/${installationId}/access_tokens`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${appJwt}`, Accept: "application/vnd.github+json", "User-Agent": "PILHA" },
+  });
+  if (!res.ok) { const e = new Error(`GitHub token HTTP ${res.status}`); e.status = res.status; throw e; }
+  const j = await res.json();
+  _ghTokenCache.set(String(installationId), { token: j.token, exp: new Date(j.expires_at).getTime() });
+  return j.token;
+}
+
+async function githubApi(token, path) {
+  const url = path.startsWith("http") ? path : `https://api.github.com${path}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "User-Agent": "PILHA" } });
+  if (!res.ok) { const e = new Error(`GitHub API ${res.status} ${path}`); e.status = res.status; throw e; }
+  return res.json();
+}
+
+// Início do mês atual (UTC) + rótulo do período
+function currentMonthRange() {
+  const now = new Date();
+  const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
+  return { since: start.toISOString(), period: `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, "0")}` };
+}
+
+// Agrega detalhes de commits (função pura — testável sem rede)
+function aggregateCommitDetails(commitDetails) {
+  let additions = 0, deletions = 0;
+  const files = new Set();
+  for (const c of commitDetails) {
+    if (c && c.stats) { additions += c.stats.additions || 0; deletions += c.stats.deletions || 0; }
+    for (const f of (c && c.files) || []) if (f && f.filename) files.add(f.filename);
+  }
+  return { commits: commitDetails.length, linesAdded: additions, linesRemoved: deletions, filesChanged: files.size };
 }
 
 function sanitizePhotoDataUrl(photo) {
@@ -196,17 +299,40 @@ function buildAuthPayload(user) {
 
 function setAuthCookie(res, payload) {
   const token = jwt.sign(payload, JWT_SECRET, { expiresIn: "12h" });
-  res.cookie(TOKEN_COOKIE, token, {
-    httpOnly: true, sameSite: "lax", secure: process.env.NODE_ENV === "production",
-    maxAge: 12 * 60 * 60 * 1000
-  });
-  // também expõe no header para o frontend guardar em sessionStorage (isolamento por aba)
+  const cookieOpts = { sameSite: "lax", secure: process.env.NODE_ENV === "production", maxAge: 12 * 60 * 60 * 1000 };
+  res.cookie(TOKEN_COOKIE, token, { ...cookieOpts, httpOnly: true });
   res.setHeader("X-Auth-Token", token);
+  // CSRF token — não-HttpOnly para que o JS do frontend possa ler e enviar no header
+  const csrfToken = crypto.randomBytes(32).toString("hex");
+  res.cookie(CSRF_COOKIE, csrfToken, { ...cookieOpts, httpOnly: false });
+}
+
+// Middleware de proteção CSRF para requisições mutáveis autenticadas.
+// Estratégia double-submit cookie: compara X-CSRF-Token header com csrf_token cookie.
+// Rotas públicas (sem cookie de sessão) são isentas — authRequired as rejeitará se necessário.
+// Rotas públicas com proteção própria (token de convite) isentas de CSRF
+const CSRF_EXEMPT_PATHS = new Set(["/api/auth/register-by-invite"]);
+
+function csrfProtect(req, res, next) {
+  const MUTATING = ["POST", "PUT", "PATCH", "DELETE"];
+  if (!MUTATING.includes(req.method)) return next();
+  if (CSRF_EXEMPT_PATHS.has(req.path)) return next();
+  const sessionToken = req.cookies[TOKEN_COOKIE];
+  if (!sessionToken) return next();
+  // Cookie presente mas inválido/expirado → trata como não autenticado (isento de CSRF)
+  try { jwt.verify(sessionToken, JWT_SECRET); } catch (_) { return next(); }
+  const fromHeader = req.headers["x-csrf-token"];
+  const fromCookie = req.cookies[CSRF_COOKIE];
+  if (!fromHeader || !fromCookie || fromHeader !== fromCookie) {
+    return res.status(403).json({ error: "Token CSRF inválido ou ausente" });
+  }
+  next();
 }
 
 async function getProjectsWithMembers(db, where = "", params = []) {
   const rows = await db.all(
     `SELECT p.id, p.name, p.team, p.deadline, p.description, p.discipline, p.start_date,
+            p.docs_unlocked, p.name_confirmed, p.turma_id,
             pm.member_name, pm.scrum_role
      FROM projects p
      LEFT JOIN project_members pm ON pm.project_id = p.id
@@ -226,6 +352,9 @@ async function getProjectsWithMembers(db, where = "", params = []) {
         description: row.description || "",
         discipline: row.discipline || "",
         startDate: row.start_date || "",
+        docsUnlocked: row.docs_unlocked === 1,
+        nameConfirmed: row.name_confirmed === 1,
+        turma_id: row.turma_id || null,
         members: [],
         memberProfiles: []
       });
@@ -242,16 +371,56 @@ async function getProjectsWithMembers(db, where = "", params = []) {
 }
 
 async function buildVisibleScope(db, user) {
-  if (user.role === "professor" || user.isAdmin) {
+  if (user.isAdmin) {
     const projects = await getProjectsWithMembers(db);
     return { projects, projectIds: new Set(projects.map((p) => Number(p.id))), tasksFilter: "" };
   }
+  if (user.role === "professor") {
+    // Usa turma_id (FK direta) — fallback SOMENTE para projetos sem turma_id (legado já backfillado)
+    const myTurmaIds = await db.all("SELECT id FROM turmas WHERE professor_id = ?", [user.id]);
+    if (myTurmaIds.length === 0) return { projects: [], projectIds: new Set(), tasksFilter: "" };
+    const ph = myTurmaIds.map(() => "?").join(",");
+    const ids = myTurmaIds.map(t => t.id);
+    const projects = await getProjectsWithMembers(db, `WHERE p.turma_id IN (${ph})`, ids);
+    return { projects, projectIds: new Set(projects.map((p) => Number(p.id))), tasksFilter: "" };
+  }
+  // Usa user_id FK primeiro; fallback apenas para linhas legadas com nome único
   const projects = await getProjectsWithMembers(
     db,
-    "WHERE p.id IN (SELECT project_id FROM project_members WHERE member_name = ?)",
-    [user.name]
+    `WHERE p.id IN (
+      SELECT project_id FROM project_members WHERE user_id = ?
+      UNION
+      SELECT pm.project_id FROM project_members pm
+      WHERE pm.user_id IS NULL AND pm.member_name = ?
+      AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = pm.member_name) = 1
+    )`,
+    [user.id, user.name]
   );
   return { projects, projectIds: new Set(projects.map((p) => Number(p.id))), tasksFilter: "" };
+}
+
+// Verifica se um professor é dono do projeto via turma_id (FK direta).
+// Falha fechado (false) se o projeto não tiver turma_id definido.
+async function professorOwnsProject(db, professorId, projectId) {
+  const row = await db.get(
+    `SELECT 1 FROM projects p
+     INNER JOIN turmas t ON p.turma_id = t.id
+     WHERE p.id = ? AND t.professor_id = ?`,
+    [projectId, professorId]
+  );
+  return !!row;
+}
+
+// Verifica se um usuário é Product Owner do projeto por user_id (FK segura).
+// Fallback apenas para linhas legadas com nome único no sistema (sem homônimos).
+// Falha fechado (null) se houver ambiguidade.
+async function isProjectPO(db, projectId, userId, userName) {
+  return await db.get(
+    `SELECT 1 FROM project_members WHERE project_id = ? AND scrum_role = 'Product Owner'
+     AND (user_id = ? OR (user_id IS NULL AND member_name = ?
+     AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = member_name) = 1))`,
+    [projectId, userId, userName]
+  );
 }
 
 async function getProjectMembersSet(db, projectId) {
@@ -263,6 +432,8 @@ async function createAndSendInvites(db, { projectId, inviterUserId, inviteEmails
   const cleanEmails = Array.from(new Set(
     (inviteEmails || []).map((e) => String(e || "").trim().toLowerCase()).filter(Boolean)
   ));
+  const inviter = await db.get("SELECT name FROM users WHERE id = ?", [inviterUserId]);
+  const poName = sanitize(inviter?.name || "seu colega");
   let created = 0;
   for (const email of cleanEmails) {
     const token = crypto.randomUUID();
@@ -272,13 +443,95 @@ async function createAndSendInvites(db, { projectId, inviterUserId, inviteEmails
     );
     created += 1;
     const inviteLink = `${APP_BASE_URL}/cadastro?invite=${token}`;
+    const recipientName = sanitize(email.split("@")[0]);
     if (mailTransporter) {
       try {
+        const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Convite para o Projeto de PI | PILHA</title>
+  <style>
+    body{margin:0;padding:0;background-color:#f0f4f9;font-family:Arial,Helvetica,sans-serif;color:#0d2137}
+    table{border-spacing:0;border-collapse:collapse}
+    img{border:0;display:block;max-width:100%}
+    .container{width:100%;max-width:600px;margin:0 auto;background-color:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 10px 28px rgba(13,33,55,.12)}
+    .header{background:linear-gradient(135deg,#071433 0%,#0d1e4a 35%,#1a237e 70%,#0d47a1 100%);padding:36px 24px;text-align:center;color:#fff}
+    .logo{font-size:30px;font-weight:800;letter-spacing:1px;margin:0}
+    .subtitle{margin:10px 0 0;font-size:14px;color:#dbeafe;line-height:1.5}
+    .content{padding:36px 40px 28px}
+    h1{margin:0 0 20px;font-size:24px;line-height:1.35;color:#0d2137}
+    p{margin:0 0 18px;font-size:15px;line-height:1.7;color:#344563}
+    .highlight{background-color:#dbeafe;border-left:5px solid #1565C0;border-radius:10px;padding:20px 22px;margin:26px 0}
+    .highlight p{margin:0;color:#0d2137;font-size:15px;line-height:1.7}
+    .orange-box{background-color:#fff3e0;border:1px solid #F47920;border-radius:12px;padding:22px;margin:28px 0}
+    .orange-box h2{margin:0 0 14px;font-size:17px;color:#0d2137}
+    .benefit{padding:12px 0;border-bottom:1px solid #dde3ec;font-size:14px;line-height:1.6;color:#344563}
+    .benefit:last-child{border-bottom:none}
+    .benefit strong{color:#0d2137}
+    .cta-wrap{text-align:center;padding:10px 0 30px}
+    .cta-button{display:inline-block;background-color:#F47920;color:#ffffff!important;text-decoration:none;font-size:16px;font-weight:bold;padding:16px 34px;border-radius:9px;box-shadow:0 8px 18px rgba(244,121,32,.28)}
+    .support{background-color:#f5f8fd;border-radius:12px;padding:22px;text-align:center;margin-top:10px}
+    .support p{margin:0;font-size:14px;color:#6b778c}
+    .support a{color:#1565C0;font-weight:bold;text-decoration:none}
+    .footer{background-color:#0D1E3E;padding:30px 24px;text-align:center;color:#8fa4c8}
+    .footer p{margin:0 0 10px;font-size:13px;line-height:1.6;color:#8fa4c8}
+    .footer strong{color:#fff}
+    .footer-line{background-color:#F47920;height:7px;line-height:7px;font-size:0}
+    @media only screen and (max-width:620px){.container{width:100%!important;border-radius:0!important}.content{padding:30px 22px 24px!important}h1{font-size:21px!important}p{font-size:14px!important}.cta-button{display:block!important;width:auto!important;padding:15px 20px!important}.header{padding:32px 18px!important}}
+  </style>
+</head>
+<body>
+  <table width="100%" border="0" cellpadding="0" cellspacing="0" role="presentation" style="background-color:#f0f4f9;padding:28px 14px;">
+    <tr><td align="center">
+      <table class="container" width="600" border="0" cellpadding="0" cellspacing="0" role="presentation">
+        <tr><td class="header">
+          <p class="logo">📚 PILHA</p>
+          <p class="subtitle">Gestão Ágil Acadêmica • Projetos Integradores</p>
+        </td></tr>
+        <tr><td class="content">
+          <h1>Olá ${recipientName}! 🚀</h1>
+          <p>Fico feliz em saber que foi convidado para o projeto de PI usando nossa plataforma PILHA !!!</p>
+          <p>Você foi convidado pelo <strong>${poName}</strong> para participar do PI. Segue o link abaixo para participar do projeto:</p>
+          <div class="cta-wrap">
+            <a href="${inviteLink}" target="_blank" class="cta-button">🚀 Participar do projeto no PILHA</a>
+          </div>
+          <div class="highlight">
+            <p>O <strong>PILHA</strong> é uma plataforma de gestão ágil acadêmica criada para facilitar a organização dos Projetos Integradores, conectando alunos, professores e equipes em um ambiente simples, visual e colaborativo.</p>
+          </div>
+          <div class="orange-box">
+            <h2>🎯 O que você pode fazer como aluno no PILHA:</h2>
+            <div class="benefit">📌 <strong>Acompanhar o projeto</strong> — visualize as etapas, atividades e o andamento do PI em tempo real.</div>
+            <div class="benefit">✅ <strong>Organizar suas tarefas</strong> — acompanhe o que precisa ser feito e ajude sua equipe a manter tudo no caminho certo.</div>
+            <div class="benefit">💬 <strong>Comunicar-se com a equipe</strong> — mantenha a troca de informações centralizada dentro da plataforma.</div>
+            <div class="benefit">📊 <strong>Ver o progresso do grupo</strong> — acompanhe o Kanban, os sprints e a evolução das entregas.</div>
+            <div class="benefit">🎓 <strong>Participar melhor do PI</strong> — tenha mais clareza sobre prazos, responsabilidades e próximos passos.</div>
+          </div>
+          <p>Depois de acessar o convite, entre na plataforma, confira as informações do projeto e participe junto com sua equipe.</p>
+          <div class="support">
+            <p>Precisa de ajuda? Entre em contato com o suporte pelo e-mail:<br>
+              <a href="mailto:joaovitorcesario@hotmail.com">joaovitorcesario@hotmail.com</a>
+            </p>
+          </div>
+        </td></tr>
+        <tr><td class="footer">
+          <p><strong>📚 PILHA</strong> — Gestão Ágil Acadêmica</p>
+          <p>© 2026 PILHA · UNIPAM. Todos os direitos reservados.</p>
+          <p>Este é um e-mail automático. Por favor, não responda diretamente a esta mensagem.</p>
+        </td></tr>
+        <tr><td class="footer-line">&nbsp;</td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
         await mailTransporter.sendMail({
-          from: process.env.SMTP_FROM || "PILHA <no-reply@pilha.local>",
+          from: process.env.SMTP_FROM || "PILHA <no-reply@eusford.com>",
           to: email,
-          subject: "Convite para participar de projeto no PILHA",
-          text: `Você foi convidado para um projeto no PILHA.\nAcesse e aceite: ${inviteLink}`
+          subject: `${poName} te convidou para um projeto no PILHA 🚀`,
+          html,
+          text: `Olá ${recipientName}! ${poName} te convidou para participar de um projeto no PILHA.\nAcesse e participe: ${inviteLink}`
         });
       } catch (err) {
         console.error(`[MAIL_ERROR] ${email}: ${err.message}`);
@@ -305,6 +558,12 @@ function authRequired(req, res, next) {
   if (!token) return res.status(401).json({ error: "Não autenticado" });
   try {
     req.user = jwt.verify(token, JWT_SECRET);
+    // Sessão legada sem cookie CSRF — gera um (mantém GET funcional; próximas mutações terão CSRF válido)
+    if (!req.cookies[CSRF_COOKIE]) {
+      const csrfToken = crypto.randomBytes(32).toString("hex");
+      const cookieOpts = { sameSite: "lax", secure: process.env.NODE_ENV === "production", maxAge: 12 * 60 * 60 * 1000, httpOnly: false };
+      res.cookie(CSRF_COOKIE, csrfToken, cookieOpts);
+    }
     return next();
   } catch (_) {
     return res.status(401).json({ error: "Sessão inválida" });
@@ -312,7 +571,7 @@ function authRequired(req, res, next) {
 }
 
 function professorOnly(req, res, next) {
-  if (req.user.role !== "professor" && !req.user.isAdmin) {
+  if (req.user.role !== "professor" && req.user.role !== "superadmin" && !req.user.isAdmin) {
     return res.status(403).json({ error: "Acesso permitido apenas para professor" });
   }
   return next();
@@ -334,16 +593,40 @@ async function createApp(dbOverride, evalDbOverride) {
   const evalDb = evalDbOverride || await initEvalDb();
   const app = express();
 
-  app.use(express.json({ limit: "5mb" }));
+  app.use(helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc:     ["'self'"],
+        scriptSrc:      ["'self'"],
+        styleSrc:       ["'self'", "'unsafe-inline'", "https://fonts.googleapis.com"],
+        fontSrc:        ["'self'", "https://fonts.gstatic.com"],
+        imgSrc:         ["'self'", "data:"],
+        connectSrc:     ["'self'", "ws:", "wss:"],
+        objectSrc:      ["'none'"],
+        frameAncestors: ["'none'"],
+        baseUri:        ["'self'"],
+        formAction:     ["'self'"],
+      },
+    },
+    crossOriginEmbedderPolicy: false,
+  }));
+  // Captura o corpo bruto (necessário para validar a assinatura HMAC do webhook GitHub)
+  app.use(express.json({ limit: "5mb", verify: (req, _res, buf) => { req.rawBody = buf; } }));
   app.use(cookieParser());
   app.disable("x-powered-by");
+  app.use(csrfProtect);
 
-  const HTML_PARTS = ['shell-top','nav','dashboard','projects','scrum','kanban','documents','turmas','chat','equipes','avaliacao','admin','modals','shell-bottom'];
+  const HTML_PARTS = ['shell-top','nav','dashboard','projects','scrum','kanban','documents','turmas','chat','equipes','avaliacao','admin','integracoes','modals','shell-bottom'];
   const _fs = require("fs");
   const _path = require("path");
+  // Versão de assets para cache-busting. Em produção, fixa por execução;
+  // em dev, muda a cada request para sempre servir JS/CSS atualizados.
+  const ASSET_VERSION_BASE = Date.now();
   function serveApp(res) {
     try {
-      const html = HTML_PARTS.map(p => _fs.readFileSync(_path.join(__dirname, 'views', p + '.html'), 'utf8')).join('\n');
+      let html = HTML_PARTS.map(p => _fs.readFileSync(_path.join(__dirname, 'views', p + '.html'), 'utf8')).join('\n');
+      const v = process.env.NODE_ENV === 'production' ? ASSET_VERSION_BASE : Date.now();
+      html = html.replace(/\?v=\d+/g, `?v=${v}`);
       res.setHeader('Content-Type', 'text/html; charset=utf-8');
       res.send(html);
     } catch (e) {
@@ -384,9 +667,22 @@ async function createApp(dbOverride, evalDbOverride) {
       }
     }
     if (!user) return res.status(401).json({ error: "Credenciais inválidas" });
-    if (!bcrypt.compareSync(String(password), user.password_hash)) return res.status(401).json({ error: "Credenciais inválidas" });
-    // 2FA for ADM (is_admin=1) and SUPER (is_admin>=2) — send OTP email, don't issue JWT yet
+    const { valid: _loginValid, needsRehash: _loginNeedsRehash } = await verifyPassword(password, user.password_hash);
+    if (!_loginValid) return res.status(401).json({ error: "Credenciais inválidas" });
+    if (_loginNeedsRehash) await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [await hashPassword(password), user.id]);
+    // Usuários dispensados de 2FA/TOTP — somente via variável de ambiente
+    // (NO_2FA_USERNAMES). Vazio por padrão → produção mantém 2FA/TOTP intactos.
     const _no2fa = (process.env.NO_2FA_USERNAMES || "").split(",").map(s => s.trim().toUpperCase()).filter(Boolean);
+    // TOTP for professors — send requiresTOTP/requiresTotpSetup, don't issue JWT yet
+    if (user.role === "professor" && user.is_admin === 0 && process.env.NODE_ENV !== "test" && !_no2fa.includes(user.username.toUpperCase())) {
+      if (user.totp_enabled) {
+        return res.json({ requiresTOTP: true, userId: user.id });
+      } else {
+        const tempToken = jwt.sign({ userId: user.id, scope: "totp-setup" }, JWT_SECRET, { expiresIn: "10m" });
+        return res.json({ requiresTotpSetup: true, userId: user.id, tempToken });
+      }
+    }
+    // 2FA for ADM (is_admin=1) and SUPER (is_admin>=2) — send OTP email, don't issue JWT yet
     if (user.is_admin >= 1 && process.env.NODE_ENV !== "test" && !_no2fa.includes(user.username.toUpperCase())) {
       const otpEmail = user.is_admin >= 2
         ? (process.env.SUPER_OTP_EMAIL || user.email)
@@ -409,7 +705,9 @@ async function createApp(dbOverride, evalDbOverride) {
             </div>`
           }).catch(err => console.error("[OTP] Falha ao enviar email:", err.message));
         }
-        console.log(`[OTP] código para ${user.username} → ${otpEmail}: ${code}`);
+        if (process.env.NODE_ENV !== "production") {
+          console.log(`[OTP] código gerado para ${user.username} → ${otpEmail}`);
+        }
         return res.json({ requires2FA: true, userId: user.id, maskedEmail: otpEmail.replace(/(.{2})(.*)(@.*)/, "$1***$3") });
       }
     }
@@ -450,7 +748,7 @@ async function createApp(dbOverride, evalDbOverride) {
       return res.status(409).json({ error: "E-mail já cadastrado" });
     }
 
-    const passwordHash = bcrypt.hashSync(String(password), 10);
+    const passwordHash = await hashPassword(password);
     const onboardingDone = cleanRole === "aluno" ? 0 : 1;
     const result = await db.run(
       "INSERT INTO users (username, name, role, email, turma, periodo, curso, onboarding_done, password_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -479,7 +777,7 @@ async function createApp(dbOverride, evalDbOverride) {
     const resetUrl = `${process.env.APP_URL || "https://eusford.com"}/?reset=${token}`;
     if (mailTransporter) {
       await mailTransporter.sendMail({
-        from: process.env.EMAIL_FROM || "PILHA <noreply@eusford.com>",
+        from: process.env.SMTP_FROM || process.env.EMAIL_FROM || "PILHA <no-reply@eusford.com>",
         to: user.email,
         subject: "Recuperação de senha — PILHA",
         html: `
@@ -506,7 +804,7 @@ async function createApp(dbOverride, evalDbOverride) {
       [token]
     );
     if (!record) return res.status(400).json({ error: "Link inválido ou expirado" });
-    const hash = bcrypt.hashSync(String(newPassword), 10);
+    const hash = await hashPassword(newPassword);
     await db.run("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", [hash, record.user_id]);
     await db.run("UPDATE password_reset_tokens SET used = 1 WHERE id = ?", [record.id]);
     res.json({ ok: true });
@@ -525,7 +823,7 @@ async function createApp(dbOverride, evalDbOverride) {
     await db.run("INSERT INTO otp_codes (user_id, code, expires_at) VALUES (?, ?, ?)", [user.id, code, expires]);
     if (mailTransporter) {
       await mailTransporter.sendMail({
-        from: process.env.EMAIL_FROM || "PILHA <noreply@eusford.com>",
+        from: process.env.SMTP_FROM || process.env.EMAIL_FROM || "PILHA <no-reply@eusford.com>",
         to: user.email,
         subject: "Código de verificação — PILHA",
         html: `
@@ -563,12 +861,109 @@ async function createApp(dbOverride, evalDbOverride) {
     res.json({ user: payload });
   });
 
+  // ── TOTP — Google Authenticator para professores ────────
+  function totpSetupAuth(req, res, next) {
+    const header = req.headers["authorization"] || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+    if (!token) return res.status(401).json({ error: "Token de configuração ausente" });
+    try {
+      const payload = jwt.verify(token, JWT_SECRET);
+      if (payload.scope !== "totp-setup") throw new Error("scope inválido");
+      req.totpUserId = payload.userId;
+      next();
+    } catch (_) {
+      return res.status(401).json({ error: "Token de configuração inválido ou expirado" });
+    }
+  }
+
+  app.get("/api/auth/totp/setup", totpSetupAuth, async (req, res) => {
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [req.totpUserId]);
+    if (!user) return res.status(404).json({ error: "Usuário não encontrado" });
+    if (user.totp_enabled) return res.status(400).json({ error: "TOTP já está ativo" });
+
+    const secret = speakeasy.generateSecret({ name: `PILHA (${sanitize(user.email || user.username)})`, length: 20 });
+    await db.run("UPDATE users SET totp_secret = ? WHERE id = ?", [secret.base32, user.id]);
+
+    const qrDataUrl = await QRCode.toDataURL(secret.otpauth_url);
+    return res.json({ secret: secret.base32, qrDataUrl });
+  });
+
+  app.post("/api/auth/totp/activate", totpSetupAuth, async (req, res) => {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ error: "Código obrigatório" });
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [req.totpUserId]);
+    if (!user || !user.totp_secret) return res.status(400).json({ error: "Configure o TOTP primeiro" });
+    if (user.totp_enabled) return res.status(400).json({ error: "TOTP já está ativo" });
+
+    const valid = speakeasy.totp.verify({ secret: user.totp_secret, encoding: "base32", token: String(code).trim(), window: 1 });
+    if (!valid) return res.status(401).json({ error: "Código inválido" });
+
+    // Gera 8 recovery codes, hasheia e salva
+    const recoveryCodes = Array.from({ length: 8 }, () => crypto.randomBytes(5).toString("hex").toUpperCase().match(/.{1,5}/g).join("-"));
+    await db.run("DELETE FROM totp_recovery_codes WHERE user_id = ?", [user.id]);
+    for (const code of recoveryCodes) {
+      const codeHash = crypto.createHash("sha256").update(code).digest("hex");
+      await db.run("INSERT INTO totp_recovery_codes (user_id, code_hash) VALUES (?, ?)", [user.id, codeHash]);
+    }
+
+    await db.run("UPDATE users SET totp_enabled = 1 WHERE id = ?", [user.id]);
+    const updatedUser = await db.get("SELECT * FROM users WHERE id = ?", [user.id]);
+    const payload = buildAuthPayload(updatedUser);
+    setAuthCookie(res, payload);
+    await db.run(
+      "INSERT INTO access_logs (user_id, username, name, role, is_admin, ip) VALUES (?, ?, ?, ?, ?, ?)",
+      [user.id, user.username, user.name, user.role, user.is_admin, "TOTP-setup"]
+    );
+    return res.json({ ok: true, user: payload, recoveryCodes });
+  });
+
+  app.post("/api/auth/totp/verify", async (req, res) => {
+    const { userId, code } = req.body || {};
+    if (!userId || !code) return res.status(400).json({ error: "userId e code obrigatórios" });
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [Number(userId)]);
+    if (!user || !user.totp_enabled || !user.totp_secret) return res.status(401).json({ error: "TOTP não configurado" });
+
+    const valid = speakeasy.totp.verify({ secret: user.totp_secret, encoding: "base32", token: String(code).trim(), window: 1 });
+    if (!valid) return res.status(401).json({ error: "Código inválido ou expirado" });
+
+    const payload = buildAuthPayload(user);
+    setAuthCookie(res, payload);
+    await db.run(
+      "INSERT INTO access_logs (user_id, username, name, role, is_admin, ip) VALUES (?, ?, ?, ?, ?, ?)",
+      [user.id, user.username, user.name, user.role, user.is_admin, "TOTP-verified"]
+    );
+    return res.json({ user: payload });
+  });
+
+  app.post("/api/auth/totp/recovery", async (req, res) => {
+    const { userId, recoveryCode } = req.body || {};
+    if (!userId || !recoveryCode) return res.status(400).json({ error: "userId e recoveryCode obrigatórios" });
+    const user = await db.get("SELECT * FROM users WHERE id = ?", [Number(userId)]);
+    if (!user || !user.totp_enabled) return res.status(401).json({ error: "TOTP não configurado" });
+
+    const codeHash = crypto.createHash("sha256").update(String(recoveryCode).trim().toUpperCase()).digest("hex");
+    const record = await db.get(
+      "SELECT * FROM totp_recovery_codes WHERE user_id = ? AND code_hash = ? AND used = 0",
+      [user.id, codeHash]
+    );
+    if (!record) return res.status(401).json({ error: "Código de recuperação inválido ou já utilizado" });
+
+    await db.run("UPDATE totp_recovery_codes SET used = 1 WHERE id = ?", [record.id]);
+    const payload = buildAuthPayload(user);
+    setAuthCookie(res, payload);
+    await db.run(
+      "INSERT INTO access_logs (user_id, username, name, role, is_admin, ip) VALUES (?, ?, ?, ?, ?, ?)",
+      [user.id, user.username, user.name, user.role, user.is_admin, "TOTP-recovery"]
+    );
+    return res.json({ user: payload });
+  });
+
   app.post("/api/auth/change-password", authRequired, async (req, res) => {
     const { newPassword } = req.body || {};
     if (!newPassword) return res.status(400).json({ error: "Nova senha é obrigatória" });
     const _pwErrChange = validatePasswordStrength(newPassword);
     if (_pwErrChange) return res.status(400).json({ error: _pwErrChange });
-    const hash = bcrypt.hashSync(String(newPassword), 10);
+    const hash = await hashPassword(newPassword);
     await db.run("UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?", [hash, req.user.id]);
     return res.json({ ok: true });
   });
@@ -576,31 +971,17 @@ async function createApp(dbOverride, evalDbOverride) {
   app.post("/api/auth/student-onboarding", authRequired, async (req, res) => {
     if (req.user.role !== "aluno") return res.status(403).json({ error: "Onboarding permitido apenas para aluno" });
 
-    const { email, password, confirmPassword, photo, turma, periodo, curso, mode, projectName, projectDeadline, scrumRole, inviteEmails, inviteToken } = req.body || {};
-    const cleanEmail = String(email || "").trim().toLowerCase();
-    const cleanPassword = String(password || "");
-    const cleanConfirm = String(confirmPassword || "");
-    // turma/período/curso podem vir do body ou já estar no user (cadastro via link)
+    const { photo, mode, scrumRole, inviteEmails, inviteToken } = req.body || {};
     const dbUser = await db.get("SELECT * FROM users WHERE id = ?", [req.user.id]);
-    const cleanTurma = String(turma || dbUser?.turma || "").trim();
-    const cleanPeriodo = String(periodo || dbUser?.periodo || "").trim();
-    const cleanCurso = String(curso || dbUser?.curso || "").trim() || null;
+    const cleanTurma = dbUser?.turma || "";
+    const cleanPeriodo = dbUser?.periodo || "";
+    const cleanCurso = dbUser?.curso || null;
     const cleanMode = String(mode || "create");
     const cleanPhoto = sanitizePhotoDataUrl(photo);
     if (cleanPhoto && typeof cleanPhoto === "object" && cleanPhoto.error) {
       return res.status(400).json({ error: cleanPhoto.error });
     }
 
-    if (!cleanEmail || !cleanPassword || !cleanConfirm) return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
-    if (cleanPassword !== cleanConfirm) return res.status(400).json({ error: "As senhas não coincidem" });
-    const _pwErrOnboarding = validatePasswordStrength(cleanPassword);
-    if (_pwErrOnboarding) return res.status(400).json({ error: _pwErrOnboarding });
-
-    if (await db.get("SELECT id FROM users WHERE email = ? AND id <> ?", [cleanEmail, req.user.id])) {
-      return res.status(409).json({ error: "E-mail já está em uso" });
-    }
-
-    const newHash = bcrypt.hashSync(cleanPassword, 10);
     let createdInvites = 0;
 
     if (cleanMode === "join") {
@@ -608,24 +989,40 @@ async function createApp(dbOverride, evalDbOverride) {
       if (!cleanToken) return res.status(400).json({ error: "Token de convite inválido" });
       const invite = await db.get("SELECT * FROM project_invites WHERE invite_token = ? AND status = 'pending'", [cleanToken]);
       if (!invite) return res.status(404).json({ error: "Convite não encontrado ou expirado" });
-      if (String(invite.invite_email).toLowerCase() !== cleanEmail) {
+      if (dbUser?.email && String(invite.invite_email).toLowerCase() !== dbUser.email.toLowerCase()) {
         return res.status(403).json({ error: `Este convite foi enviado para: ${invite.invite_email}` });
       }
-      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [invite.project_id, req.user.name]);
+      // Validar turma_id do projeto
+      const projectForJoin = await db.get("SELECT turma_id FROM projects WHERE id = ?", [invite.project_id]);
+      if (!projectForJoin?.turma_id) return res.status(400).json({ error: "Projeto não vinculado a uma turma" });
+      if (dbUser?.turma_id && dbUser.turma_id !== projectForJoin.turma_id) {
+        return res.status(403).json({ error: "Este projeto pertence a outra turma" });
+      }
+      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role, user_id) VALUES (?, ?, 'Development Team', ?)", [invite.project_id, req.user.name, req.user.id]);
       await db.run("UPDATE project_invites SET status = 'accepted', accepted_at = ? WHERE id = ?", [new Date().toISOString(), invite.id]);
+      // Preencher turma_id do aluno se ainda não tiver
+      if (!dbUser?.turma_id) {
+        await db.run("UPDATE users SET turma_id = ? WHERE id = ?", [projectForJoin.turma_id, req.user.id]);
+      }
     } else {
-      const cleanProjectName = String(projectName || "").trim();
-      const cleanDeadline = String(projectDeadline || "").trim();
-      const cleanScrumRole = VALID_SCRUM_ROLES.includes(String(scrumRole || "")) ? String(scrumRole) : "Development Team";
-      if (!cleanProjectName || !cleanDeadline) return res.status(400).json({ error: "Nome do projeto e prazo são obrigatórios" });
-      const created = await db.run("INSERT INTO projects (name, team, deadline) VALUES (?, ?, ?)", [cleanProjectName, cleanTurma, cleanDeadline]);
-      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, ?)", [created.lastID, req.user.name, cleanScrumRole]);
+      const cleanScrumRole = VALID_SCRUM_ROLES.includes(String(scrumRole || "")) ? String(scrumRole) : "Product Owner";
+      // Exigir turma_id: sem turma, o projeto fica invisível para o professor
+      if (!dbUser?.turma_id) {
+        return res.status(400).json({ error: "Aluno deve estar vinculado a uma turma para criar projeto. Registre-se via link de turma." });
+      }
+      const turmaIdForProject = dbUser.turma_id;
+      // Nome provisório — PO define o nome definitivo na aba de projetos
+      const defaultName = `Projeto de ${sanitize(req.user.name || "Aluno")}`;
+      // Prazo provisório — professor ajusta depois
+      const defaultDeadline = new Date(Date.now() + 180 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+      const created = await db.run("INSERT INTO projects (name, team, deadline, turma_id) VALUES (?, ?, ?, ?)", [defaultName, cleanTurma, defaultDeadline, turmaIdForProject]);
+      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role, user_id) VALUES (?, ?, ?, ?)", [created.lastID, req.user.name, cleanScrumRole, req.user.id]);
       createdInvites = await createAndSendInvites(db, { projectId: created.lastID, inviterUserId: req.user.id, inviteEmails: Array.isArray(inviteEmails) ? inviteEmails : [] });
     }
 
     await db.run(
-      "UPDATE users SET email = ?, onboarding_done = 1, password_hash = ?, turma = ?, periodo = ?, curso = ?, photo = ? WHERE id = ?",
-      [cleanEmail, newHash, cleanTurma, cleanPeriodo, cleanCurso, cleanPhoto, req.user.id]
+      "UPDATE users SET onboarding_done = 1, turma = ?, periodo = ?, curso = ?, photo = ? WHERE id = ?",
+      [cleanTurma, cleanPeriodo, cleanCurso, cleanPhoto, req.user.id]
     );
 
     const updatedUser = await db.get("SELECT * FROM users WHERE id = ?", [req.user.id]);
@@ -639,6 +1036,7 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.post("/api/auth/logout", (_req, res) => {
     res.clearCookie(TOKEN_COOKIE);
+    res.clearCookie(CSRF_COOKIE);
     return res.json({ ok: true });
   });
 
@@ -680,14 +1078,36 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!req.user.email || req.user.email.toLowerCase() !== String(invite.invite_email).toLowerCase()) {
       return res.status(403).json({ error: "Este convite pertence a outro e-mail" });
     }
-    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [invite.project_id, req.user.name]);
+    // Validar turma_id do projeto
+    const projForAccept = await db.get("SELECT turma_id FROM projects WHERE id = ?", [invite.project_id]);
+    if (!projForAccept?.turma_id) return res.status(400).json({ error: "Projeto não vinculado a uma turma" });
+    const dbUserAccept = await db.get("SELECT turma_id FROM users WHERE id = ?", [req.user.id]);
+    if (dbUserAccept?.turma_id && dbUserAccept.turma_id !== projForAccept.turma_id) {
+      return res.status(403).json({ error: "Este projeto pertence a outra turma" });
+    }
+    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role, user_id) VALUES (?, ?, 'Development Team', ?)", [invite.project_id, req.user.name, req.user.id]);
     await db.run("UPDATE project_invites SET status = 'accepted', accepted_at = ? WHERE id = ?", [new Date().toISOString(), invite.id]);
+    // Preencher turma_id do aluno se ainda não tiver
+    if (!dbUserAccept?.turma_id) {
+      await db.run("UPDATE users SET turma_id = ? WHERE id = ?", [projForAccept.turma_id, req.user.id]);
+    }
     return res.json({ ok: true });
   });
 
   // ── Students / Profile ────────────────────────────────────────────────────
 
-  app.get("/api/students", authRequired, async (_req, res) => {
+  app.get("/api/students", authRequired, async (req, res) => {
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      const myTurmas = await db.all("SELECT id FROM turmas WHERE professor_id = ?", [req.user.id]);
+      if (myTurmas.length === 0) return res.json([]);
+      const ids = myTurmas.map(t => t.id);
+      const placeholders = ids.map(() => "?").join(",");
+      const students = await db.all(
+        `SELECT id, name, turma, periodo, photo FROM users WHERE role = 'aluno' AND turma_id IN (${placeholders}) ORDER BY name`,
+        ids
+      );
+      return res.json(students);
+    }
     const students = await db.all("SELECT id, name, turma, periodo, photo FROM users WHERE role = 'aluno' ORDER BY name");
     return res.json(students);
   });
@@ -740,44 +1160,124 @@ async function createApp(dbOverride, evalDbOverride) {
   });
 
   app.post("/api/projects", authRequired, professorOnly, async (req, res) => {
-    const { name, team, members, deadline, scrumRoles, description, discipline, startDate } = req.body || {};
+    const { name, team, members, deadline, scrumRoles, description, discipline, startDate, turmaId } = req.body || {};
     if (!name || !team || !deadline || !Array.isArray(members) || members.length === 0) {
       return res.status(400).json({ error: "Dados inválidos para criar projeto" });
     }
+    // Resolver turma_id: exigir turmaId explícito; professor deve ser dono
+    let resolvedTurmaId = null;
+    if (turmaId) {
+      const owns = req.user.isAdmin
+        ? await db.get("SELECT id FROM turmas WHERE id = ?", [Number(turmaId)])
+        : await db.get("SELECT id FROM turmas WHERE id = ? AND professor_id = ?", [Number(turmaId), req.user.id]);
+      if (!owns) return res.status(403).json({ error: "Turma não encontrada ou sem permissão" });
+      resolvedTurmaId = Number(turmaId);
+    } else if (!req.user.isAdmin) {
+      // Professor deve informar turmaId explícito — resolução automática por nome é ambígua
+      return res.status(400).json({ error: "turmaId é obrigatório para criar projeto vinculado à turma" });
+    }
+    // Admin pode criar projeto sem turmaId (projeto sem turma)
     const created = await db.run(
-      "INSERT INTO projects (name, team, deadline, description, discipline, start_date) VALUES (?, ?, ?, ?, ?, ?)",
-      [name, team, deadline, String(description || "").trim(), String(discipline || "").trim(), String(startDate || "").trim()]
+      "INSERT INTO projects (name, team, deadline, description, discipline, start_date, turma_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [name, team, deadline, String(description || "").trim(), String(discipline || "").trim(), String(startDate || "").trim(), resolvedTurmaId]
     );
     const cleanMembers = members.map((m) => String(m).trim()).filter(Boolean);
     for (const member of cleanMembers) {
       const roleFromPayload = scrumRoles && typeof scrumRoles === "object" ? scrumRoles[member] : null;
       const scrumRole = VALID_SCRUM_ROLES.includes(roleFromPayload) ? roleFromPayload : "Development Team";
-      await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, ?)", [created.lastID, member, scrumRole]);
+      // Resolver user_id: apenas se houver exatamente um usuário com este nome (sem ambiguidade)
+      const userForMember = await db.get(
+        "SELECT id FROM users WHERE name = ? AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = ?) = 1",
+        [member, member]
+      );
+      await db.run(
+        "INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role, user_id) VALUES (?, ?, ?, ?)",
+        [created.lastID, member, scrumRole, userForMember?.id || null]
+      );
     }
     return res.status(201).json({ id: String(created.lastID) });
   });
 
-  // Atualiza nome/descrição do projeto (professor, admin ou PO do projeto)
+  // Atualiza nome/descrição do projeto (professor, admin ou PO — PO não pode alterar nome após confirmação)
   app.patch("/api/projects/:id", authRequired, async (req, res) => {
     const projectId = Number(req.params.id);
     if (!projectId) return res.status(400).json({ error: "ID inválido" });
     const isProfOrAdmin = req.user.isAdmin || req.user.role === "professor";
     if (!isProfOrAdmin) {
       const poRow = await db.get(
-        "SELECT * FROM project_members WHERE project_id = ? AND member_name = ? AND scrum_role = 'Product Owner'",
-        [projectId, req.user.name]
+        `SELECT 1 FROM project_members WHERE project_id = ? AND scrum_role = 'Product Owner'
+         AND (user_id = ? OR (user_id IS NULL AND member_name = ?
+         AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = member_name) = 1))`,
+        [projectId, req.user.id, req.user.name]
       );
       if (!poRow) return res.status(403).json({ error: "Sem permissão" });
+      // PO não pode alterar nome se já foi confirmado — somente professor pode
+      const proj = await db.get("SELECT name_confirmed FROM projects WHERE id = ?", [projectId]);
+      if (proj?.name_confirmed && req.body?.name !== undefined) {
+        return res.status(403).json({ error: "Nome já confirmado. Somente o professor pode alterá-lo." });
+      }
     }
-    const { name, description } = req.body || {};
+    // Professor (não admin) só pode editar projetos da própria turma
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      if (!await professorOwnsProject(db, req.user.id, projectId))
+        return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
+    }
+    const { name, description, deadline, startDate } = req.body || {};
+    // Datas do projeto: SOMENTE professor/admin podem alterar
+    if ((deadline !== undefined || startDate !== undefined) && !isProfOrAdmin) {
+      return res.status(403).json({ error: "Apenas o professor pode alterar as datas do projeto." });
+    }
     const updates = [];
     const vals = [];
     if (name !== undefined) { updates.push("name = ?"); vals.push(sanitize(String(name).trim())); }
     if (description !== undefined) { updates.push("description = ?"); vals.push(sanitize(String(description))); }
+    if (deadline !== undefined) { updates.push("deadline = ?"); vals.push(String(deadline).trim()); }
+    if (startDate !== undefined) { updates.push("start_date = ?"); vals.push(String(startDate).trim()); }
     if (!updates.length) return res.status(400).json({ error: "Nada para atualizar" });
     vals.push(projectId);
     await db.run(`UPDATE projects SET ${updates.join(", ")} WHERE id = ?`, vals);
     return res.json({ ok: true });
+  });
+
+  // PO confirma o nome definitivo do projeto (após isso só professor pode mudar)
+  app.post("/api/projects/:id/confirm-name", authRequired, async (req, res) => {
+    const projectId = Number(req.params.id);
+    if (!projectId) return res.status(400).json({ error: "ID inválido" });
+    // Verificar escopo: usuário deve ter acesso ao projeto
+    const scope = await buildVisibleScope(db, req.user);
+    if (!scope.projectIds.has(projectId)) return res.status(403).json({ error: "Sem permissão" });
+    const isProfOrAdmin = req.user.isAdmin || req.user.role === "professor";
+    if (!isProfOrAdmin) {
+      const poRow = await isProjectPO(db, projectId, req.user.id, req.user.name);
+      if (!poRow) return res.status(403).json({ error: "Apenas o Product Owner pode confirmar o nome" });
+    }
+    // Professor (não admin) só pode agir em projetos da própria turma
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      if (!await professorOwnsProject(db, req.user.id, projectId))
+        return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
+    }
+    const name = sanitize(String(req.body?.name || "").trim());
+    if (!name) return res.status(400).json({ error: "Nome inválido" });
+    await db.run("UPDATE projects SET name = ?, name_confirmed = 1 WHERE id = ?", [name, projectId]);
+    return res.json({ ok: true });
+  });
+
+  // Professor/admin alterna liberação de TAP/PI para alunos do projeto
+  app.patch("/api/projects/:id/unlock-docs", authRequired, async (req, res) => {
+    if (!req.user.isAdmin && req.user.role !== "professor")
+      return res.status(403).json({ error: "Apenas professores podem liberar documentos" });
+    const projectId = Number(req.params.id);
+    if (!projectId) return res.status(400).json({ error: "ID inválido" });
+    // Professor (não admin) só pode alterar projeto da própria turma
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      if (!await professorOwnsProject(db, req.user.id, projectId))
+        return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
+    }
+    const proj = await db.get("SELECT docs_unlocked FROM projects WHERE id = ?", [projectId]);
+    if (!proj) return res.status(404).json({ error: "Projeto não encontrado" });
+    const newVal = proj.docs_unlocked ? 0 : 1;
+    await db.run("UPDATE projects SET docs_unlocked = ? WHERE id = ?", [newVal, projectId]);
+    return res.json({ ok: true, docsUnlocked: newVal === 1 });
   });
 
   // Update a member's Scrum role (professor, admin, or PO of the project)
@@ -785,12 +1285,14 @@ async function createApp(dbOverride, evalDbOverride) {
     const projectId = Number(req.params.id);
     const isProfOrAdmin = req.user.isAdmin || req.user.role === "professor";
     if (!isProfOrAdmin) {
-      // verifica se é PO do projeto
-      const poRow = await db.get(
-        "SELECT * FROM project_members WHERE project_id = ? AND member_name = ? AND scrum_role = 'Product Owner'",
-        [projectId, req.user.name]
-      );
+      // Verifica se é PO do projeto (por user_id, com fallback legado seguro)
+      const poRow = await isProjectPO(db, projectId, req.user.id, req.user.name);
       if (!poRow) return res.status(403).json({ error: "Apenas o Product Owner, professores ou admin podem alterar papéis" });
+    }
+    // Professor (não admin) só pode alterar papéis de projetos da própria turma
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      if (!await professorOwnsProject(db, req.user.id, projectId))
+        return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
     }
     const memberName = decodeURIComponent(req.params.memberName);
     const newRole = String(req.body?.role || "");
@@ -798,7 +1300,7 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!VALID_ROLES_WITH_NULL.includes(newRole)) {
       return res.status(400).json({ error: "Papel inválido" });
     }
-    const dbRole = newRole === "sem_papel" ? null : newRole;
+    const dbRole = newRole === "sem_papel" ? "Development Team" : newRole;
     const row = await db.get("SELECT * FROM project_members WHERE project_id = ? AND member_name = ?", [projectId, memberName]);
     if (!row) return res.status(404).json({ error: "Membro não encontrado neste projeto" });
     await db.run("UPDATE project_members SET scrum_role = ? WHERE project_id = ? AND member_name = ?", [dbRole, projectId, memberName]);
@@ -811,14 +1313,21 @@ async function createApp(dbOverride, evalDbOverride) {
     const memberName = decodeURIComponent(req.params.memberName);
     const isProfOrAdmin = req.user.isAdmin || req.user.role === "professor";
     if (!isProfOrAdmin) {
-      const poRow = await db.get(
-        "SELECT * FROM project_members WHERE project_id = ? AND member_name = ? AND scrum_role = 'Product Owner'",
-        [projectId, req.user.name]
-      );
+      // Verifica se é PO do projeto (por user_id, com fallback legado seguro)
+      const poRow = await isProjectPO(db, projectId, req.user.id, req.user.name);
       if (!poRow) return res.status(403).json({ error: "Apenas o Product Owner pode remover membros" });
     }
-    // PO não pode se remover
-    if (memberName === req.user.name && !isProfOrAdmin)
+    // Professor (não admin) só pode alterar projeto da própria turma
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      if (!await professorOwnsProject(db, req.user.id, projectId))
+        return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
+    }
+    // PO não pode se remover (verifica por user_id, não por nome)
+    const selfMember = await db.get("SELECT user_id, member_name FROM project_members WHERE project_id = ? AND member_name = ?", [projectId, memberName]);
+    const isSelf = selfMember?.user_id
+      ? selfMember.user_id === req.user.id
+      : memberName === req.user.name;
+    if (isSelf && !isProfOrAdmin)
       return res.status(400).json({ error: "O PO não pode se remover do projeto" });
     await db.run("DELETE FROM project_members WHERE project_id = ? AND member_name = ?", [projectId, memberName]);
     res.json({ ok: true });
@@ -829,11 +1338,14 @@ async function createApp(dbOverride, evalDbOverride) {
     const projectId = Number(req.params.id);
     const isProfOrAdmin = req.user.isAdmin || req.user.role === "professor";
     if (!isProfOrAdmin) {
-      const poRow = await db.get(
-        "SELECT * FROM project_members WHERE project_id = ? AND member_name = ? AND scrum_role = 'Product Owner'",
-        [projectId, req.user.name]
-      );
+      // Verifica se é PO do projeto (por user_id, com fallback legado seguro)
+      const poRow = await isProjectPO(db, projectId, req.user.id, req.user.name);
       if (!poRow) return res.status(403).json({ error: "Apenas o Product Owner pode adicionar membros" });
+    }
+    // Professor (não admin) só pode alterar projeto da própria turma
+    if (req.user.role === "professor" && !req.user.isAdmin) {
+      if (!await professorOwnsProject(db, req.user.id, projectId))
+        return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
     }
     const email = String(req.body?.email || "").trim().toLowerCase();
     if (!email) return res.status(400).json({ error: "E-mail obrigatório" });
@@ -842,7 +1354,10 @@ async function createApp(dbOverride, evalDbOverride) {
     if (user.role !== "aluno" && !isProfOrAdmin) return res.status(400).json({ error: "Usuário não é aluno" });
     const existing = await db.get("SELECT * FROM project_members WHERE project_id = ? AND member_name = ?", [projectId, user.name]);
     if (existing) return res.status(409).json({ error: `${user.name} já está no projeto` });
-    await db.run("INSERT INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [projectId, user.name]);
+    await db.run(
+      "INSERT INTO project_members (project_id, member_name, scrum_role, user_id) VALUES (?, ?, 'Development Team', ?)",
+      [projectId, user.name, user.id]
+    );
     res.status(201).json({ ok: true, name: user.name });
   });
 
@@ -935,6 +1450,7 @@ async function createApp(dbOverride, evalDbOverride) {
   });
 
   // ── EXPORT AVALIAÇÃO — por turma ou por grupo ─────────────
+  // Uma linha por aluno com pontuação e observação individuais.
   async function buildGradingWorkbook(projects, evalDb, turmaLabel) {
     const ExcelJS = require("exceljs");
     const wb = new ExcelJS.Workbook();
@@ -945,66 +1461,86 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!projectIds.length) return wb;
     const ph = projectIds.map(() => "?").join(",");
 
-    // Atividades únicas ordenadas por seção
+    // Atividades ordenadas por seção
     const allActs = await evalDb.all(
       `SELECT * FROM eval_activities WHERE project_id IN (${ph}) ORDER BY section, id`,
       projectIds
     );
-    // Scores por atividade (média dos membros do grupo)
-    const actAvgs = await evalDb.all(
-      `SELECT ea.project_id, ea.id as activity_id, ea.name, ea.section, ea.max_pts,
-              ROUND(AVG(COALESCE(eas.score, 0)), 1) as avg_score
-       FROM eval_activities ea
-       LEFT JOIN eval_activity_scores eas ON eas.activity_id = ea.id
-       WHERE ea.project_id IN (${ph})
-       GROUP BY ea.id`,
+    // Scores individuais por atividade (eval_activity_scores)
+    const actScores = await evalDb.all(
+      `SELECT eas.member_name, eas.score, ea.project_id, ea.id as activity_id, ea.name, ea.section
+       FROM eval_activity_scores eas
+       INNER JOIN eval_activities ea ON ea.id = eas.activity_id
+       WHERE ea.project_id IN (${ph})`,
       projectIds
     );
-    const metas = await evalDb.all(
-      `SELECT * FROM eval_meta WHERE project_id IN (${ph})`,
+    // Dados individuais por aluno (eval_individual)
+    const indivRows = await evalDb.all(
+      `SELECT project_id, member_name, score, entrega_score, observacao
+       FROM eval_individual WHERE project_id IN (${ph})`,
       projectIds
     );
 
-    // Colunas dinâmicas únicas por seção
-    const seen = new Set();
-    const planActs = [];
-    const devActs  = [];
-    for (const a of allActs) {
-      const key = a.section + "::" + a.name;
-      if (!seen.has(key)) {
-        seen.add(key);
-        if (a.section === "planejamento") planActs.push({ name: a.name, max_pts: a.max_pts });
-        else devActs.push({ name: a.name, max_pts: a.max_pts });
+    // Colunas de atividades com suporte a nomes duplicados dentro do mesmo projeto
+    // Atividades com mesmo nome na mesma seção recebem sufixo "(2)", "(3)", etc.
+    // Colunas são compartilhadas entre projetos por (section, name, occurrenceIdx).
+    function buildActCols(section) {
+      const cols = [];
+      const seen = new Set();
+      for (const a of allActs) {
+        if (a.section !== section) continue;
+        const occIdx = allActs.filter(
+          x => x.project_id === a.project_id && x.section === section && x.name === a.name && x.id < a.id
+        ).length;
+        const colKey = `${section}::${a.name}::${occIdx}`;
+        if (!seen.has(colKey)) {
+          seen.add(colKey);
+          const displayName = occIdx > 0 ? `${a.name} (${occIdx + 1})` : a.name;
+          cols.push({ name: a.name, display_name: displayName, max_pts: a.max_pts, occurrenceIdx: occIdx });
+        }
       }
+      return cols;
     }
-    const planMax = planActs.reduce((s, a) => s + (a.max_pts || 0), 0);
-    const devMax  = devActs.reduce((s, a)  => s + (a.max_pts || 0), 0);
+    const planActs = buildActCols("planejamento");
+    const devActs  = buildActCols("desenvolvimento");
+    const planMax  = planActs.reduce((s, a) => s + (a.max_pts || 0), 0);
+    const devMax   = devActs.reduce((s, a)  => s + (a.max_pts || 0), 0);
 
     // Índices de colunas (1-based)
     const COL_NUM        = 1;
     const COL_PROJ       = 2;
-    const COL_MEMB       = 3;
+    const COL_ALUNO      = 3;
     const COL_PLAN_START = 4;
     const COL_PLAN_TOTAL = COL_PLAN_START + planActs.length;
     const COL_DEV_START  = COL_PLAN_TOTAL + 1;
     const COL_DEV_TOTAL  = COL_DEV_START + devActs.length;
     const COL_ENTREGA    = COL_DEV_TOTAL + 1;
-    const COL_NOTA       = COL_ENTREGA + 1;
+    const COL_PTS_IND    = COL_ENTREGA + 1;
+    const COL_NOTA       = COL_PTS_IND + 1;
     const COL_OBS        = COL_NOTA + 1;
-    const TOTAL_COLS     = COL_OBS;
 
-    // ── Helpers ──────────────────────────────────────────────────
-    const RED   = "FF7A010A";
-    const PINK  = "FFF3D7DA";
-    const VPINK = "FFFFF3F4";
-    const WHITE = "FFFFFFFF";
-    const BLACK = "FF000000";
-    const GRAY  = "FFD9D9D9";
+    // ── Cores por seção ──────────────────────────────────────────
+    const C_FIXED  = "FF7A010A"; // vermelho — fixas
+    const C_PLAN_H = "FF1B5E20"; // verde escuro — PLANEJAMENTO
+    const C_PLAN_M = "FFA5D6A7"; // verde médio
+    const C_PLAN_R = "FFE8F5E9"; // verde claro
+    const C_DEV_H  = "FF0D47A1"; // azul escuro — DESENVOLVIMENTO
+    const C_DEV_M  = "FF90CAF9"; // azul médio
+    const C_DEV_R  = "FFE3F2FD"; // azul claro
+    const C_ENT_H  = "FFE65100"; // laranja — ENTREGA
+    const C_ENT_R  = "FFFFF3E0";
+    const C_IND_H  = "FF4A148C"; // roxo — INDIVIDUAL
+    const C_IND_R  = "FFF3E5F5";
+    const C_NOTA_H = "FF006064"; // petróleo — NOTA FINAL
+    const C_OBS_H  = "FF37474F"; // cinza — OBS
+    const C_OBS_R  = "FFECEFF1";
+    const WHITE    = "FFFFFFFF";
+    const BLACK    = "FF000000";
 
     const mkFill   = (argb) => ({ type: "pattern", pattern: "solid", fgColor: { argb } });
     const mkFont   = (bold, color = BLACK, size = 10) => ({ bold, color: { argb: color }, size, name: "Calibri" });
-    const mkBorder = (color = "FFCCCCCC") => {
-      const s = { style: "thin", color: { argb: color } };
+    const mkBorder = () => {
+      const s = { style: "thin", color: { argb: "FFCCCCCC" } };
       return { top: s, left: s, bottom: s, right: s };
     };
 
@@ -1015,172 +1551,175 @@ async function createApp(dbOverride, evalDbOverride) {
       cell.border = mkBorder();
     }
 
-    // ── ROW 1: Cabeçalhos de seção (merge vertical para fixas) ──
+    // ── ROW 1: Cabeçalhos de seção ──────────────────────────────
     ws.getRow(1).height = 30;
     ws.getRow(2).height = 38;
     ws.getRow(3).height = 18;
 
-    // Colunas fixas: Nº, Trabalho, Integrantes — merge rows 1-3
-    const fixed = [
-      { col: COL_NUM,  val: "Nº" },
-      { col: COL_PROJ, val: "Trabalho" },
-      { col: COL_MEMB, val: "Integrantes" },
-    ];
-    for (const { col, val } of fixed) {
-      const c = ws.getCell(1, col);
-      c.value = val;
-      sc(c, { bg: RED, fg: WHITE, bold: true });
+    // Colunas fixas: Nº, Projeto, Aluno — merge rows 1-3
+    for (const [col, val] of [[COL_NUM, "Nº"], [COL_PROJ, "Projeto"], [COL_ALUNO, "Aluno"]]) {
+      ws.getCell(1, col).value = val;
+      sc(ws.getCell(1, col), { bg: C_FIXED, fg: WHITE, bold: true });
       ws.mergeCells(1, col, 3, col);
     }
 
-    // PLANEJAMENTO — row 1 com colspan (atividades + Total)
-    if (planActs.length >= 0) {
-      const planColEnd = COL_PLAN_TOTAL;
-      const cP = ws.getCell(1, COL_PLAN_START);
-      cP.value = "PLANEJAMENTO";
-      sc(cP, { bg: RED, fg: WHITE, bold: true, size: 11 });
-      if (planColEnd > COL_PLAN_START) ws.mergeCells(1, COL_PLAN_START, 1, planColEnd);
+    // PLANEJAMENTO — row 1 com colspan
+    if (planActs.length > 0) {
+      ws.getCell(1, COL_PLAN_START).value = "PLANEJAMENTO";
+      sc(ws.getCell(1, COL_PLAN_START), { bg: C_PLAN_H, fg: WHITE, bold: true, size: 11 });
+      ws.mergeCells(1, COL_PLAN_START, 1, COL_PLAN_TOTAL);
     }
 
-    // DESENVOLVIMENTO — row 1 com colspan (atividades + Total)
-    if (devActs.length >= 0) {
-      const devColEnd = COL_DEV_TOTAL;
-      const cD = ws.getCell(1, COL_DEV_START);
-      cD.value = "DESENVOLVIMENTO";
-      sc(cD, { bg: RED, fg: WHITE, bold: true, size: 11 });
-      if (devColEnd > COL_DEV_START) ws.mergeCells(1, COL_DEV_START, 1, devColEnd);
+    // DESENVOLVIMENTO — row 1 com colspan
+    if (devActs.length > 0) {
+      ws.getCell(1, COL_DEV_START).value = "DESENVOLVIMENTO";
+      sc(ws.getCell(1, COL_DEV_START), { bg: C_DEV_H, fg: WHITE, bold: true, size: 11 });
+      ws.mergeCells(1, COL_DEV_START, 1, COL_DEV_TOTAL);
     }
 
-    // Entrega, Nota Final, Observações — merge rows 1-3
-    for (const [col, val] of [[COL_ENTREGA, "Entrega"], [COL_NOTA, "Nota Final"], [COL_OBS, "Observações"]]) {
-      const c = ws.getCell(1, col);
-      c.value = val;
-      sc(c, { bg: RED, fg: WHITE, bold: true });
+    // ENTREGA, INDIVIDUAL, NOTA FINAL, OBS — merge rows 1-3
+    for (const [col, val, bg] of [
+      [COL_ENTREGA, "ENTREGA\n7 PTS", C_ENT_H],
+      [COL_PTS_IND, "INDIVIDUAL",     C_IND_H],
+      [COL_NOTA,    "NOTA FINAL",     C_NOTA_H],
+      [COL_OBS,     "OBS",            C_OBS_H],
+    ]) {
+      ws.getCell(1, col).value = val;
+      sc(ws.getCell(1, col), { bg, fg: WHITE, bold: true, wrap: true });
       ws.mergeCells(1, col, 3, col);
     }
 
     // ── ROW 2: Nomes das atividades ──────────────────────────────
     planActs.forEach((a, i) => {
-      const c = ws.getCell(2, COL_PLAN_START + i);
-      c.value = a.name;
-      sc(c, { bg: PINK, bold: true, wrap: true, size: 9 });
+      ws.getCell(2, COL_PLAN_START + i).value = a.display_name;
+      sc(ws.getCell(2, COL_PLAN_START + i), { bg: C_PLAN_M, bold: true, wrap: true, size: 9 });
     });
-    const cPlanTotH = ws.getCell(2, COL_PLAN_TOTAL);
-    cPlanTotH.value = "Total";
-    sc(cPlanTotH, { bg: PINK, bold: true });
+    if (planActs.length > 0) {
+      ws.getCell(2, COL_PLAN_TOTAL).value = "Total";
+      sc(ws.getCell(2, COL_PLAN_TOTAL), { bg: C_PLAN_M, bold: true });
+    }
 
     devActs.forEach((a, i) => {
-      const c = ws.getCell(2, COL_DEV_START + i);
-      c.value = a.name;
-      sc(c, { bg: PINK, bold: true, wrap: true, size: 9 });
+      ws.getCell(2, COL_DEV_START + i).value = a.display_name;
+      sc(ws.getCell(2, COL_DEV_START + i), { bg: C_DEV_M, bold: true, wrap: true, size: 9 });
     });
-    const cDevTotH = ws.getCell(2, COL_DEV_TOTAL);
-    cDevTotH.value = "Total";
-    sc(cDevTotH, { bg: PINK, bold: true });
+    if (devActs.length > 0) {
+      ws.getCell(2, COL_DEV_TOTAL).value = "Total";
+      sc(ws.getCell(2, COL_DEV_TOTAL), { bg: C_DEV_M, bold: true });
+    }
 
     // ── ROW 3: Pontos máximos ────────────────────────────────────
     planActs.forEach((a, i) => {
-      const c = ws.getCell(3, COL_PLAN_START + i);
-      c.value = a.max_pts || 0;
-      sc(c, { bg: VPINK });
+      ws.getCell(3, COL_PLAN_START + i).value = a.max_pts || 0;
+      sc(ws.getCell(3, COL_PLAN_START + i), { bg: C_PLAN_R });
     });
-    const cPlanMaxH = ws.getCell(3, COL_PLAN_TOTAL);
-    cPlanMaxH.value = planMax;
-    sc(cPlanMaxH, { bg: VPINK, bold: true });
+    if (planActs.length > 0) {
+      ws.getCell(3, COL_PLAN_TOTAL).value = planMax;
+      sc(ws.getCell(3, COL_PLAN_TOTAL), { bg: C_PLAN_M, bold: true });
+    }
 
     devActs.forEach((a, i) => {
-      const c = ws.getCell(3, COL_DEV_START + i);
-      c.value = a.max_pts || 0;
-      sc(c, { bg: VPINK });
+      ws.getCell(3, COL_DEV_START + i).value = a.max_pts || 0;
+      sc(ws.getCell(3, COL_DEV_START + i), { bg: C_DEV_R });
     });
-    const cDevMaxH = ws.getCell(3, COL_DEV_TOTAL);
-    cDevMaxH.value = devMax;
-    sc(cDevMaxH, { bg: VPINK, bold: true });
+    if (devActs.length > 0) {
+      ws.getCell(3, COL_DEV_TOTAL).value = devMax;
+      sc(ws.getCell(3, COL_DEV_TOTAL), { bg: C_DEV_M, bold: true });
+    }
 
-    // ── DADOS: Uma linha por projeto ─────────────────────────────
-    const ROW_BGAS = ["FFFFFFFF", "FFFFF5F5"];
+    // ── DADOS: Uma linha por aluno ───────────────────────────────
+    let rowN = 4;
 
-    projects.forEach((proj, idx) => {
-      const rowN   = 4 + idx;
+    for (const proj of projects) {
+      const projId  = Number(proj.id);
       const members = proj.members || [];
-      const meta    = metas.find(m => m.project_id === Number(proj.id)) || {};
-      const bg      = ROW_BGAS[idx % 2];
 
-      // Altura dinâmica para acomodar membros
-      ws.getRow(rowN).height = Math.max(20, members.length * 16);
+      for (const memberName of members) {
+        ws.getRow(rowN).height = 20;
 
-      // Nº
-      const cN = ws.getCell(rowN, COL_NUM);
-      cN.value = idx + 1;
-      sc(cN, { bg, bold: true });
+        // Nº / Projeto / Aluno
+        ws.getCell(rowN, COL_NUM).value = rowN - 3;
+        sc(ws.getCell(rowN, COL_NUM), { bold: true });
+        ws.getCell(rowN, COL_PROJ).value = proj.name;
+        sc(ws.getCell(rowN, COL_PROJ), { h: "left" });
+        ws.getCell(rowN, COL_ALUNO).value = memberName;
+        sc(ws.getCell(rowN, COL_ALUNO), { h: "left" });
 
-      // Trabalho
-      const cP = ws.getCell(rowN, COL_PROJ);
-      cP.value = proj.name + (proj.team ? `\n${proj.team}` : "");
-      sc(cP, { bg, h: "left", wrap: true });
+        // Atividades de planejamento — usa occurrenceIdx para lidar com nomes duplicados
+        let planTotal = 0;
+        planActs.forEach((actCol, i) => {
+          const matches = allActs
+            .filter(a => a.project_id === projId && a.section === "planejamento" && a.name === actCol.name)
+            .sort((a, b) => a.id - b.id);
+          const actRec = matches[actCol.occurrenceIdx] || null;
+          const scoreRec = actRec
+            ? actScores.find(s => s.activity_id === actRec.id && s.member_name === memberName)
+            : null;
+          const val = scoreRec ? scoreRec.score : null;
+          ws.getCell(rowN, COL_PLAN_START + i).value = val;
+          sc(ws.getCell(rowN, COL_PLAN_START + i), { bg: C_PLAN_R, h: "center" });
+          if (val != null) planTotal = Math.round((planTotal + val) * 10) / 10;
+        });
+        if (planActs.length > 0) {
+          ws.getCell(rowN, COL_PLAN_TOTAL).value = planTotal || null;
+          sc(ws.getCell(rowN, COL_PLAN_TOTAL), { bg: C_PLAN_M, bold: true });
+        }
 
-      // Integrantes (todos empilhados)
-      const cM = ws.getCell(rowN, COL_MEMB);
-      cM.value = members.join("\n");
-      sc(cM, { bg, h: "left", v: "top", wrap: true });
+        // Atividades de desenvolvimento
+        let devTotal = 0;
+        devActs.forEach((actCol, i) => {
+          const matches = allActs
+            .filter(a => a.project_id === projId && a.section === "desenvolvimento" && a.name === actCol.name)
+            .sort((a, b) => a.id - b.id);
+          const actRec = matches[actCol.occurrenceIdx] || null;
+          const scoreRec = actRec
+            ? actScores.find(s => s.activity_id === actRec.id && s.member_name === memberName)
+            : null;
+          const val = scoreRec ? scoreRec.score : null;
+          ws.getCell(rowN, COL_DEV_START + i).value = val;
+          sc(ws.getCell(rowN, COL_DEV_START + i), { bg: C_DEV_R, h: "center" });
+          if (val != null) devTotal = Math.round((devTotal + val) * 10) / 10;
+        });
+        if (devActs.length > 0) {
+          ws.getCell(rowN, COL_DEV_TOTAL).value = devTotal || null;
+          sc(ws.getCell(rowN, COL_DEV_TOTAL), { bg: C_DEV_M, bold: true });
+        }
 
-      // Planejamento: avg por atividade
-      let planTotal = 0;
-      planActs.forEach((act, i) => {
-        const rec = actAvgs.find(s => s.project_id === Number(proj.id) && s.section === "planejamento" && s.name === act.name);
-        const val = rec ? rec.avg_score : null;
-        const c = ws.getCell(rowN, COL_PLAN_START + i);
-        c.value = val;
-        sc(c, { bg: "FFFDF5F5", h: "center" });
-        if (val != null) planTotal = Math.round((planTotal + val) * 10) / 10;
-      });
-      const cPT = ws.getCell(rowN, COL_PLAN_TOTAL);
-      cPT.value = planTotal || null;
-      sc(cPT, { bg: PINK, bold: true });
+        // Dados individuais (entrega_score é per-member)
+        const indiv = indivRows.find(r => r.project_id === projId && r.member_name === memberName) || {};
 
-      // Desenvolvimento: avg por atividade
-      let devTotal = 0;
-      devActs.forEach((act, i) => {
-        const rec = actAvgs.find(s => s.project_id === Number(proj.id) && s.section === "desenvolvimento" && s.name === act.name);
-        const val = rec ? rec.avg_score : null;
-        const c = ws.getCell(rowN, COL_DEV_START + i);
-        c.value = val;
-        sc(c, { bg: "FFFDF5F5", h: "center" });
-        if (val != null) devTotal = Math.round((devTotal + val) * 10) / 10;
-      });
-      const cDT = ws.getCell(rowN, COL_DEV_TOTAL);
-      cDT.value = devTotal || null;
-      sc(cDT, { bg: PINK, bold: true });
+        const entrega = (indiv.entrega_score != null && indiv.entrega_score !== 0) ? indiv.entrega_score : null;
+        ws.getCell(rowN, COL_ENTREGA).value = entrega;
+        sc(ws.getCell(rowN, COL_ENTREGA), { bg: C_ENT_R, h: "center" });
 
-      // Entrega
-      const entrega = meta.entrega_score ?? null;
-      const cE = ws.getCell(rowN, COL_ENTREGA);
-      cE.value = entrega;
-      sc(cE, { bg, h: "center" });
+        const ptsInd = (indiv.score != null && indiv.score !== 0) ? indiv.score : null;
+        ws.getCell(rowN, COL_PTS_IND).value = ptsInd;
+        sc(ws.getCell(rowN, COL_PTS_IND), { bg: C_IND_R, bold: true });
 
-      // Nota Final = planTotal + devTotal + entrega (badge vermelho)
-      const notaFinal = Math.round((planTotal + devTotal + (entrega || 0)) * 10) / 10;
-      const cNF = ws.getCell(rowN, COL_NOTA);
-      cNF.value = notaFinal || null;
-      sc(cNF, { bg: RED, fg: WHITE, bold: true, size: 11 });
+        // Nota Final = plan + dev + entrega individual + pontos individuais
+        const notaFinal = Math.round((planTotal + devTotal + (entrega || 0) + (ptsInd || 0)) * 10) / 10;
+        ws.getCell(rowN, COL_NOTA).value = notaFinal || null;
+        sc(ws.getCell(rowN, COL_NOTA), { bg: C_NOTA_H, fg: WHITE, bold: true, size: 11 });
 
-      // Observações
-      const cO = ws.getCell(rowN, COL_OBS);
-      cO.value = meta.observacoes || null;
-      sc(cO, { bg, h: "left", wrap: true });
-    });
+        ws.getCell(rowN, COL_OBS).value = indiv.observacao || null;
+        sc(ws.getCell(rowN, COL_OBS), { bg: C_OBS_R, h: "left", wrap: true });
+
+        rowN++;
+      }
+    }
 
     // Larguras
-    ws.getColumn(COL_NUM).width  = 5;
-    ws.getColumn(COL_PROJ).width = 30;
-    ws.getColumn(COL_MEMB).width = 32;
+    ws.getColumn(COL_NUM).width   = 5;
+    ws.getColumn(COL_PROJ).width  = 28;
+    ws.getColumn(COL_ALUNO).width = 28;
     for (let i = 0; i < planActs.length; i++) ws.getColumn(COL_PLAN_START + i).width = 14;
-    ws.getColumn(COL_PLAN_TOTAL).width = 10;
+    if (planActs.length > 0) ws.getColumn(COL_PLAN_TOTAL).width = 10;
     for (let i = 0; i < devActs.length; i++) ws.getColumn(COL_DEV_START + i).width = 14;
-    ws.getColumn(COL_DEV_TOTAL).width = 10;
-    ws.getColumn(COL_ENTREGA).width = 10;
-    ws.getColumn(COL_NOTA).width = 12;
-    ws.getColumn(COL_OBS).width = 35;
+    if (devActs.length > 0) ws.getColumn(COL_DEV_TOTAL).width = 10;
+    ws.getColumn(COL_ENTREGA).width  = 12;
+    ws.getColumn(COL_PTS_IND).width  = 14;
+    ws.getColumn(COL_NOTA).width     = 14;
+    ws.getColumn(COL_OBS).width      = 35;
 
     // Freeze: 3 linhas de header + 3 colunas fixas
     ws.views = [{ state: "frozen", ySplit: 3, xSplit: 3 }];
@@ -1188,21 +1727,28 @@ async function createApp(dbOverride, evalDbOverride) {
     return wb;
   }
 
-  // Export por turma (todos os grupos da turma)
-  app.get("/api/export/grading/turma/:turma", authRequired, professorOnly, async (req, res) => {
-    const turma = decodeURIComponent(req.params.turma);
-    const projects = await getProjectsWithMembers(db, "WHERE p.team = ?", [turma]);
+  // Export por turma (todos os grupos da turma) — parâmetro é turmaId numérico
+  app.get("/api/export/grading/turma/:turmaId", authRequired, professorOnly, async (req, res) => {
+    const turmaId = Number(req.params.turmaId);
+    if (!turmaId) return res.status(400).json({ error: "ID de turma inválido" });
+    const turmaRow = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
+    if (!turmaRow) return res.status(404).json({ error: "Turma não encontrada" });
+    if (!req.user.isAdmin && turmaRow.professor_id !== req.user.id)
+      return res.status(403).json({ error: "Você não é o professor responsável por esta turma" });
+    const projects = await getProjectsWithMembers(db, "WHERE p.turma_id = ?", [turmaId]);
     if (!projects.length) return res.status(404).json({ error: "Nenhum projeto encontrado para esta turma" });
-    const wb = await buildGradingWorkbook(projects, evalDb, turma);
-    const fname = `Avaliacao_${turma.replace(/[^a-zA-Z0-9]/g, "_")}.xlsx`;
+    const wb = await buildGradingWorkbook(projects, evalDb, turmaRow.turma);
+    const fname = `Avaliacao_${turmaRow.turma.replace(/[^a-zA-Z0-9]/g, "_")}.xlsx`;
     res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     await wb.xlsx.write(res);
     res.end();
   });
 
-  // Export por grupo (um projeto específico)
+  // Export por grupo (um projeto específico) — vedado para aluno
   app.get("/api/export/grading/project/:id", authRequired, async (req, res) => {
+    if (req.user.role === "aluno" && !req.user.isAdmin)
+      return res.status(403).json({ error: "Aluno não pode exportar planilha de avaliação" });
     const scope = await buildVisibleScope(db, req.user);
     const projectId = Number(req.params.id);
     if (!scope.projectIds.has(projectId)) return res.status(403).json({ error: "Sem permissão" });
@@ -1217,10 +1763,12 @@ async function createApp(dbOverride, evalDbOverride) {
     res.end();
   });
 
-  // Lista de turmas únicas (para o select de exportação)
-  app.get("/api/export/turmas", authRequired, professorOnly, async (_req, res) => {
-    const rows = await db.all("SELECT DISTINCT team FROM projects WHERE team IS NOT NULL AND team != '' ORDER BY team");
-    res.json(rows.map(r => r.team));
+  // Lista de turmas (para o select de exportação) — retorna IDs, não texto
+  app.get("/api/export/turmas", authRequired, professorOnly, async (req, res) => {
+    const rows = req.user.isAdmin
+      ? await db.all("SELECT id, turma, curso, periodo FROM turmas ORDER BY turma")
+      : await db.all("SELECT id, turma, curso, periodo FROM turmas WHERE professor_id = ? ORDER BY turma", [req.user.id]);
+    res.json(rows.map(r => ({ id: r.id, turma: r.turma, label: `${r.turma} · ${r.periodo} · ${r.curso}` })));
   });
 
   app.post("/api/projects/:id/invites", authRequired, async (req, res) => {
@@ -1294,7 +1842,9 @@ async function createApp(dbOverride, evalDbOverride) {
     const placeholders = ids.map(() => "?").join(",");
     const tasks = await db.all(
       `SELECT t.id, t.project_id, t.title, t.assignee, t.due_date, t.start_date, t.sprint_id,
-              t.status, t.priority, t.points, t.description, t.checklist, t.tags, t.urgency, t.parent_task_id
+              t.status, t.priority, t.points, t.description, t.checklist, t.tags, t.urgency, t.parent_task_id,
+              (SELECT g.repo FROM task_github g WHERE g.task_id = t.id) AS github_repo,
+              (SELECT g.note FROM task_github g WHERE g.task_id = t.id) AS github_note
        FROM tasks t WHERE t.project_id IN (${placeholders}) ORDER BY t.id DESC`,
       ids
     );
@@ -1308,7 +1858,9 @@ async function createApp(dbOverride, evalDbOverride) {
   app.get("/api/tasks/:id", authRequired, async (req, res) => {
     const task = await db.get(
       `SELECT t.id, t.project_id, t.title, t.assignee, t.due_date, t.start_date, t.sprint_id,
-              t.status, t.priority, t.points, t.description, t.checklist, t.tags, t.urgency, t.parent_task_id
+              t.status, t.priority, t.points, t.description, t.checklist, t.tags, t.urgency, t.parent_task_id,
+              (SELECT g.repo FROM task_github g WHERE g.task_id = t.id) AS github_repo,
+              (SELECT g.note FROM task_github g WHERE g.task_id = t.id) AS github_note
        FROM tasks t WHERE t.id = ?`,
       [req.params.id]
     );
@@ -1349,7 +1901,7 @@ async function createApp(dbOverride, evalDbOverride) {
 
     if (customValues && typeof customValues === "object") {
       for (const [fieldId, value] of Object.entries(customValues)) {
-        await db.run("INSERT OR REPLACE INTO custom_field_values (task_id, field_id, value) VALUES (?, ?, ?)", [created.lastID, fieldId, String(value)]);
+        await db.run("INSERT INTO custom_field_values (task_id, field_id, value) VALUES (?, ?, ?) ON CONFLICT (task_id, field_id) DO UPDATE SET value = EXCLUDED.value", [created.lastID, fieldId, String(value)]);
       }
     }
 
@@ -1415,22 +1967,72 @@ async function createApp(dbOverride, evalDbOverride) {
   app.patch("/api/tasks/:id/status", authRequired, async (req, res) => {
     const normalizedStatus = cleanStatus(req.body?.status);
     if (!VALID_STATUS.includes(normalizedStatus)) return res.status(400).json({ error: "Status inválido" });
-    const task = await db.get("SELECT id, project_id FROM tasks WHERE id = ?", [req.params.id]);
+    const task = await db.get("SELECT id, project_id, status FROM tasks WHERE id = ?", [req.params.id]);
     if (!task) return res.status(404).json({ error: "Tarefa não encontrada" });
     const scope = await buildVisibleScope(db, req.user);
     if (!scope.projectIds.has(task.project_id)) return res.status(403).json({ error: "Sem permissão" });
-    await db.run("UPDATE tasks SET status = ? WHERE id = ?", [normalizedStatus, req.params.id]);
+    const taskId = Number(req.params.id);
+    await db.run("UPDATE tasks SET status = ? WHERE id = ?", [normalizedStatus, taskId]);
+    if (task.status !== normalizedStatus) {
+      await logTaskAudit(db, task.id, req.user.name, "status", task.status, normalizedStatus);
+      if (app._io) {
+        app._io.to(`project:${task.project_id}`).emit("task-updated", { taskId, status: normalizedStatus });
+      }
+      // Persistir notificações e emitir socket por membro (sempre, independente de _io)
+      try {
+        const members = await db.all(
+          `SELECT DISTINCT u.id FROM users u
+           JOIN project_members pm ON (
+             (pm.user_id IS NOT NULL AND pm.user_id = u.id)
+             OR (pm.user_id IS NULL AND pm.member_name = u.name
+                 AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = u.name) = 1)
+           )
+           WHERE pm.project_id = ?`,
+          [task.project_id]
+        );
+        for (const m of members) {
+          const notifMsg = `Tarefa movida para ${normalizedStatus}`;
+          const notifLink = `/kanban?task=${taskId}`;
+          // Persistir no banco (sempre)
+          try {
+            await db.run(
+              "INSERT INTO notifications (user_id, type, message, link) VALUES (?, 'task_moved', ?, ?)",
+              [m.id, notifMsg, notifLink]
+            );
+          } catch (_) {}
+          if (app._io) {
+            app._io.to(`user:${m.id}`).emit("notification", {
+              type: "task_moved",
+              message: notifMsg,
+              link: notifLink,
+              taskId,
+              projectId: task.project_id
+            });
+          }
+        }
+      } catch (_) {}
+    }
     return res.json({ ok: true });
   });
 
   app.patch("/api/tasks/:id/checklist", authRequired, async (req, res) => {
     const { checklist } = req.body || {};
     if (!Array.isArray(checklist)) return res.status(400).json({ error: "Checklist deve ser um array" });
-    const task = await db.get("SELECT id, project_id FROM tasks WHERE id = ?", [req.params.id]);
+    const task = await db.get("SELECT id, project_id, checklist FROM tasks WHERE id = ?", [req.params.id]);
     if (!task) return res.status(404).json({ error: "Tarefa não encontrada" });
     const scope = await buildVisibleScope(db, req.user);
     if (!scope.projectIds.has(task.project_id)) return res.status(403).json({ error: "Sem permissão" });
     await db.run("UPDATE tasks SET checklist = ? WHERE id = ?", [JSON.stringify(checklist), req.params.id]);
+    // Detecta itens recém-concluídos para um histórico mais útil
+    try {
+      const flat = (arr) => (Array.isArray(arr) ? arr.flatMap(g => Array.isArray(g.items) ? g.items : []) : []);
+      const before = flat(JSON.parse(task.checklist || "[]"));
+      const after = flat(checklist);
+      const beforeDone = new Set(before.filter(i => i.done).map(i => String(i.id)));
+      const newlyDone = after.filter(i => i.done && !beforeDone.has(String(i.id)));
+      if (newlyDone.length === 1) await logTaskAudit(db, task.id, req.user.name, "checklist_item_done", null, newlyDone[0].title);
+      else await logTaskAudit(db, task.id, req.user.name, "checklist", null, null);
+    } catch (_) { await logTaskAudit(db, task.id, req.user.name, "checklist", null, null); }
     return res.json({ ok: true });
   });
 
@@ -1453,7 +2055,29 @@ async function createApp(dbOverride, evalDbOverride) {
     const scope = await buildVisibleScope(db, req.user);
     if (!scope.projectIds.has(task.project_id)) return res.status(403).json({ error: "Sem permissão" });
     await db.run("UPDATE tasks SET tags = ? WHERE id = ?", [JSON.stringify(tags), req.params.id]);
+    const tagNames = tags.map((t) => (t && typeof t === "object" ? t.name : t)).filter(Boolean).join(", ");
+    await logTaskAudit(db, task.id, req.user.name, "tags", null, tagNames);
     return res.json({ ok: true });
+  });
+
+  // ── GitHub por tarefa (repositório + nota "o que estou fazendo") ──────────
+  app.patch("/api/tasks/:id/github", authRequired, async (req, res) => {
+    const repo = String(req.body?.repo || "").trim().slice(0, 300);
+    const note = String(req.body?.note || "").trim().slice(0, 2000);
+    const task = await db.get("SELECT id, project_id FROM tasks WHERE id = ?", [req.params.id]);
+    if (!task) return res.status(404).json({ error: "Tarefa não encontrada" });
+    const scope = await buildVisibleScope(db, req.user);
+    if (!scope.projectIds.has(task.project_id)) return res.status(403).json({ error: "Sem permissão" });
+    const prev = await db.get("SELECT repo FROM task_github WHERE task_id = ?", [task.id]);
+    await db.run(
+      `INSERT INTO task_github (task_id, repo, note, updated_by, updated_at)
+       VALUES (?, ?, ?, ?, datetime('now'))
+       ON CONFLICT(task_id) DO UPDATE SET repo = excluded.repo, note = excluded.note,
+         updated_by = excluded.updated_by, updated_at = datetime('now')`,
+      [task.id, repo, note, req.user.name]
+    );
+    if ((prev?.repo || "") !== repo && repo) await logTaskAudit(db, task.id, req.user.name, "github_repo", null, repo);
+    return res.json({ ok: true, repo, note });
   });
 
   app.delete("/api/tasks/:id", authRequired, async (req, res) => {
@@ -1492,6 +2116,7 @@ async function createApp(dbOverride, evalDbOverride) {
       "INSERT INTO task_comments (task_id, user_id, content) VALUES (?, ?, ?)",
       [req.params.id, req.user.id, String(content).trim()]
     );
+    await logTaskAudit(db, task.id, req.user.name, "comentario", null, null);
     return res.status(201).json({ id: String(created.lastID) });
   });
 
@@ -1583,7 +2208,7 @@ async function createApp(dbOverride, evalDbOverride) {
     if (await db.get("SELECT id FROM users WHERE email = ?", [cleanEmail]))
       return res.status(409).json({ error: "E-mail já cadastrado" });
 
-    const hash = bcrypt.hashSync(String(password), 10);
+    const hash = await hashPassword(password);
     const result = await db.run(
       "INSERT INTO users (username, name, role, email, turma, periodo, curso, turma_id, onboarding_done, password_hash) VALUES (?, ?, 'aluno', ?, ?, ?, ?, ?, 0, ?)",
       [username, cleanName, cleanEmail, turmaRow.turma, turmaRow.periodo, turmaRow.curso, turmaRow.id, hash]
@@ -1616,13 +2241,18 @@ async function createApp(dbOverride, evalDbOverride) {
 
     const cleanName = sanitize(name);
     const username  = sanitizeUsername(cleanEmail.split("@")[0] + "_" + Math.floor(Math.random() * 999));
-    const hash      = bcrypt.hashSync(String(password), 10);
+    const hash      = await hashPassword(password);
 
+    const projForInvite = await db.get("SELECT turma_id FROM projects WHERE id = ?", [invite.project_id]);
+    if (!projForInvite?.turma_id) {
+      return res.status(400).json({ error: "O projeto do convite não está vinculado a uma turma. Contacte o professor." });
+    }
+    const inviteTurmaId = projForInvite.turma_id;
     const result = await db.run(
-      "INSERT INTO users (username, name, role, email, onboarding_done, password_hash) VALUES (?, ?, 'aluno', ?, 1, ?)",
-      [username, cleanName, cleanEmail, hash]
+      "INSERT INTO users (username, name, role, email, onboarding_done, turma_id, password_hash) VALUES (?, ?, 'aluno', ?, 1, ?, ?)",
+      [username, cleanName, cleanEmail, inviteTurmaId, hash]
     );
-    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role) VALUES (?, ?, NULL)", [invite.project_id, cleanName]);
+    await db.run("INSERT OR IGNORE INTO project_members (project_id, member_name, scrum_role, user_id) VALUES (?, ?, 'Development Team', ?)", [invite.project_id, cleanName, result.lastID]);
     await db.run("UPDATE project_invites SET status = 'accepted', accepted_at = ? WHERE id = ?", [new Date().toISOString(), invite.id]);
 
     const user = await db.get("SELECT * FROM users WHERE id = ?", [result.lastID]);
@@ -1636,8 +2266,10 @@ async function createApp(dbOverride, evalDbOverride) {
     const { email, password } = req.body || {};
     if (!email || !password) return res.status(400).json({ error: "E-mail e senha são obrigatórios" });
     const user = await db.get("SELECT * FROM users WHERE email = ?", [String(email).trim().toLowerCase()]);
-    if (!user || !bcrypt.compareSync(String(password), user.password_hash))
-      return res.status(401).json({ error: "Credenciais inválidas" });
+    if (!user) return res.status(401).json({ error: "Credenciais inválidas" });
+    const { valid: _leValid, needsRehash: _leNeedsRehash } = await verifyPassword(password, user.password_hash);
+    if (!_leValid) return res.status(401).json({ error: "Credenciais inválidas" });
+    if (_leNeedsRehash) await db.run("UPDATE users SET password_hash = ? WHERE id = ?", [await hashPassword(password), user.id]);
     if (user.must_change_password)
       return res.json({ mustChangePassword: true, userId: user.id });
     const payload = buildAuthPayload(user);
@@ -1649,12 +2281,21 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.get("/api/chat/:turmaId", authRequired, async (req, res) => {
     const turmaId = Number(req.params.turmaId);
-    // verifica acesso: professor da turma ou aluno da turma
     const turma = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
     if (!turma) return res.status(404).json({ error: "Turma não encontrada" });
-    const isProf = req.user.role === "professor";
-    const isStudent = req.user.turma_id === turmaId || req.user.turma === turma.turma;
-    if (!isProf && !isStudent) return res.status(403).json({ error: "Sem permissão" });
+    // Admin: acesso irrestrito
+    if (!req.user.isAdmin) {
+      if (req.user.role === "professor") {
+        // Professor só acessa chat da própria turma
+        if (turma.professor_id !== req.user.id)
+          return res.status(403).json({ error: "Sem permissão para este chat" });
+      } else {
+        // Aluno só acessa chat da turma vinculada (users.turma_id)
+        const userRow = await db.get("SELECT turma_id FROM users WHERE id = ?", [req.user.id]);
+        if (!userRow || userRow.turma_id !== turmaId)
+          return res.status(403).json({ error: "Sem permissão para este chat" });
+      }
+    }
     const msgs = await db.all(
       `SELECT cm.id, cm.content, cm.created_at, u.name as sender_name, u.role as sender_role, u.photo as sender_photo
        FROM chat_messages cm JOIN users u ON u.id = cm.sender_id
@@ -1668,9 +2309,16 @@ async function createApp(dbOverride, evalDbOverride) {
     const turmaId = Number(req.params.turmaId);
     const turma = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
     if (!turma) return res.status(404).json({ error: "Turma não encontrada" });
-    const isProf = req.user.role === "professor";
-    const isStudent = req.user.turma_id === turmaId || req.user.turma === turma.turma;
-    if (!isProf && !isStudent) return res.status(403).json({ error: "Sem permissão" });
+    if (!req.user.isAdmin) {
+      if (req.user.role === "professor") {
+        if (turma.professor_id !== req.user.id)
+          return res.status(403).json({ error: "Sem permissão para este chat" });
+      } else {
+        const userRow = await db.get("SELECT turma_id FROM users WHERE id = ?", [req.user.id]);
+        if (!userRow || userRow.turma_id !== turmaId)
+          return res.status(403).json({ error: "Sem permissão para este chat" });
+      }
+    }
     const content = sanitize(String(req.body?.content || ""), 2000);
     if (!content) return res.status(400).json({ error: "Mensagem vazia" });
     const result = await db.run(
@@ -1700,6 +2348,17 @@ async function createApp(dbOverride, evalDbOverride) {
     const turmaId = Number(req.params.turmaId);
     const turma = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
     if (!turma) return res.status(404).json({ error: "Turma não encontrada" });
+    if (!req.user.isAdmin) {
+      if (req.user.role === "professor") {
+        if (turma.professor_id !== req.user.id)
+          return res.status(403).json({ error: "Sem permissão" });
+      } else {
+        // Aluno só acessa membros da turma onde está vinculado
+        const userRow = await db.get("SELECT turma_id FROM users WHERE id = ?", [req.user.id]);
+        if (!userRow || userRow.turma_id !== turmaId)
+          return res.status(403).json({ error: "Sem permissão" });
+      }
+    }
     const members = await db.all(
       `SELECT u.id, u.name, u.role, u.email, u.turma, u.periodo, u.curso, u.photo,
               u.bio, u.skills, u.graduations, u.specialty, u.experience_years, u.profile_complete,
@@ -1723,10 +2382,11 @@ async function createApp(dbOverride, evalDbOverride) {
     const { section, name, max_pts } = req.body || {};
     if (!["planejamento", "desenvolvimento"].includes(section) || !name)
       return res.status(400).json({ error: "Dados inválidos" });
-    // Busca todos projetos da turma
-    const turma = await db.get("SELECT turma FROM turmas WHERE id = ?", [turmaId]);
+    const turma = await db.get("SELECT * FROM turmas WHERE id = ?", [turmaId]);
     if (!turma) return res.status(404).json({ error: "Turma não encontrada" });
-    const projects = await db.all("SELECT id FROM projects WHERE team LIKE ?", [`%${turma.turma}%`]);
+    if (!req.user.isAdmin && turma.professor_id !== req.user.id)
+      return res.status(403).json({ error: "Sem permissão" });
+    const projects = await db.all("SELECT id FROM projects WHERE turma_id = ?", [turmaId]);
     const ids = [];
     for (const proj of projects) {
       const r = await evalDb.run(
@@ -1779,7 +2439,7 @@ async function createApp(dbOverride, evalDbOverride) {
       const prefixLength = Math.max(1, 49 - suffix.length);
       username = sanitizeUsername(`${baseUsername.slice(0, prefixLength)}.${suffix}`);
     }
-    const passwordHash = bcrypt.hashSync(cleanPassword, 10);
+    const passwordHash = await hashPassword(cleanPassword);
     const created = await db.run(
       "INSERT INTO users (username, name, role, email, is_admin, onboarding_done, must_change_password, password_hash) VALUES (?, ?, 'professor', ?, 0, 1, 1, ?)",
       [username, cleanName, cleanEmail, passwordHash]
@@ -1830,7 +2490,7 @@ async function createApp(dbOverride, evalDbOverride) {
 </table></td></tr></table>
 </body></html>`;
       mailTransporter.sendMail({
-        from: process.env.EMAIL_FROM || "PILHA <noreply@eusford.com>",
+        from: process.env.SMTP_FROM || process.env.EMAIL_FROM || "PILHA <no-reply@eusford.com>",
         to: cleanEmail,
         subject: "Bem-vindo ao PILHA — Seus dados de acesso",
         html: welcomeHtml
@@ -1914,12 +2574,19 @@ async function createApp(dbOverride, evalDbOverride) {
 
   // ── Evaluation (professor only) ───────────────────────────────────────────
 
-  app.get("/api/eval", authRequired, professorOnly, async (_req, res) => {
-    const activities = await evalDb.all("SELECT * FROM eval_activities ORDER BY project_id, section, id");
-    const activityScores = await evalDb.all("SELECT * FROM eval_activity_scores");
-    const individual = await evalDb.all("SELECT * FROM eval_individual");
-    const meta = await evalDb.all("SELECT * FROM eval_meta");
-    const photoRows = await db.all("SELECT name, photo FROM users WHERE photo IS NOT NULL AND photo != ''");
+  app.get("/api/eval", authRequired, professorOnly, async (req, res) => {
+    const scope = await buildVisibleScope(db, req.user);
+    const ids = [...scope.projectIds];
+    if (ids.length === 0) return res.json({ activities: [], activityScores: [], individual: [], meta: [], memberPhotos: {} });
+    const ph = ids.map(() => "?").join(",");
+    const activities    = await evalDb.all(`SELECT * FROM eval_activities WHERE project_id IN (${ph}) ORDER BY project_id, section, id`, ids);
+    const actIds        = activities.map(a => a.id);
+    const activityScores = actIds.length
+      ? await evalDb.all(`SELECT * FROM eval_activity_scores WHERE activity_id IN (${actIds.map(() => "?").join(",")})`, actIds)
+      : [];
+    const individual = await evalDb.all(`SELECT * FROM eval_individual WHERE project_id IN (${ph})`, ids);
+    const meta       = await evalDb.all(`SELECT * FROM eval_meta WHERE project_id IN (${ph})`, ids);
+    const photoRows  = await db.all("SELECT name, photo FROM users WHERE photo IS NOT NULL AND photo != ''");
     const memberPhotos = {};
     for (const row of photoRows) memberPhotos[row.name] = row.photo;
     return res.json({ activities, activityScores, individual, meta, memberPhotos });
@@ -1930,6 +2597,8 @@ async function createApp(dbOverride, evalDbOverride) {
     const { section, name, max_pts } = req.body || {};
     if (!["planejamento", "desenvolvimento"].includes(section)) return res.status(400).json({ error: "Seção inválida" });
     if (!name || !String(name).trim()) return res.status(400).json({ error: "Nome obrigatório" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Sem permissão" });
     const maxPts = Math.max(0, Number(max_pts) || 0);
     const created = await evalDb.run(
       "INSERT INTO eval_activities (project_id, section, name, max_pts, score) VALUES (?, ?, ?, ?, 0)",
@@ -1940,8 +2609,10 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.patch("/api/eval/activities/:actId", authRequired, professorOnly, async (req, res) => {
     const { name, max_pts } = req.body || {};
-    const act = await evalDb.get("SELECT id FROM eval_activities WHERE id = ?", [req.params.actId]);
+    const act = await evalDb.get("SELECT id, project_id FROM eval_activities WHERE id = ?", [req.params.actId]);
     if (!act) return res.status(404).json({ error: "Atividade não encontrada" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, act.project_id))
+      return res.status(403).json({ error: "Sem permissão" });
     if (name !== undefined) await evalDb.run("UPDATE eval_activities SET name = ? WHERE id = ?", [String(name).trim(), req.params.actId]);
     if (max_pts !== undefined) await evalDb.run("UPDATE eval_activities SET max_pts = ? WHERE id = ?", [Math.max(0, Number(max_pts) || 0), req.params.actId]);
     return res.json({ ok: true });
@@ -1951,6 +2622,10 @@ async function createApp(dbOverride, evalDbOverride) {
     const { member_name, score } = req.body || {};
     if (!member_name) return res.status(400).json({ error: "member_name obrigatório" });
     const actId = Number(req.params.actId);
+    const _actOwn = await evalDb.get("SELECT project_id FROM eval_activities WHERE id = ?", [actId]);
+    if (!_actOwn) return res.status(404).json({ error: "Atividade não encontrada" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, _actOwn.project_id))
+      return res.status(403).json({ error: "Sem permissão" });
     const cleanScore = Math.max(0, Number(score) || 0);
     const existing = await evalDb.get("SELECT activity_id FROM eval_activity_scores WHERE activity_id = ? AND member_name = ?", [actId, member_name]);
     if (!existing) {
@@ -1962,12 +2637,18 @@ async function createApp(dbOverride, evalDbOverride) {
   });
 
   app.delete("/api/eval/activities/:actId", authRequired, professorOnly, async (req, res) => {
+    const _actDel = await evalDb.get("SELECT project_id FROM eval_activities WHERE id = ?", [req.params.actId]);
+    if (!_actDel) return res.status(404).json({ error: "Atividade não encontrada" });
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, _actDel.project_id))
+      return res.status(403).json({ error: "Sem permissão" });
     await evalDb.run("DELETE FROM eval_activities WHERE id = ?", [req.params.actId]);
     return res.json({ ok: true });
   });
 
   app.patch("/api/eval/:projectId/meta", authRequired, professorOnly, async (req, res) => {
     const projectId = Number(req.params.projectId);
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Sem permissão" });
     const { entrega_score, observacoes } = req.body || {};
     const existing = await evalDb.get("SELECT project_id FROM eval_meta WHERE project_id = ?", [projectId]);
     if (!existing) {
@@ -1988,14 +2669,24 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.patch("/api/eval/:projectId/individual", authRequired, professorOnly, async (req, res) => {
     const projectId = Number(req.params.projectId);
-    const { member_name, score } = req.body || {};
+    // Checar ownership ANTES de qualquer escrita
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
+    const { member_name, score, entrega_score, observacao } = req.body || {};
     if (!member_name) return res.status(400).json({ error: "member_name obrigatório" });
-    const cleanScore = Math.max(0, Number(score) || 0);
+    // garante a linha
     const existing = await evalDb.get("SELECT project_id FROM eval_individual WHERE project_id = ? AND member_name = ?", [projectId, member_name]);
     if (!existing) {
-      await evalDb.run("INSERT INTO eval_individual (project_id, member_name, score) VALUES (?, ?, ?)", [projectId, member_name, cleanScore]);
-    } else {
-      await evalDb.run("UPDATE eval_individual SET score = ? WHERE project_id = ? AND member_name = ?", [cleanScore, projectId, member_name]);
+      await evalDb.run("INSERT INTO eval_individual (project_id, member_name, score) VALUES (?, ?, 0)", [projectId, member_name]);
+    }
+    const sets = [];
+    const params = [];
+    if (score !== undefined) { sets.push("score = ?"); params.push(Math.max(0, Number(score) || 0)); }
+    if (entrega_score !== undefined) { sets.push("entrega_score = ?"); params.push(Math.min(7, Math.max(0, Number(entrega_score) || 0))); }
+    if (observacao !== undefined) { sets.push("observacao = ?"); params.push(String(observacao)); }
+    if (sets.length) {
+      params.push(projectId, member_name);
+      await evalDb.run(`UPDATE eval_individual SET ${sets.join(", ")} WHERE project_id = ? AND member_name = ?`, params);
     }
     return res.json({ ok: true });
   });
@@ -2003,7 +2694,7 @@ async function createApp(dbOverride, evalDbOverride) {
   // ── Routing ───────────────────────────────────────────────────────────────
 
   // ── Super Admin: visualizador de código e banco ──────────────────────────
-  const fs = require("fs").promises;
+  const fsAsync = require("fs").promises;
   const SUPERADM_FILES = [
     "server.js", "app.js", "index.html", "styles.css",
     "db.js", "package.json", ".env.example", "landing.html"
@@ -2013,7 +2704,7 @@ async function createApp(dbOverride, evalDbOverride) {
     const results = [];
     for (const filename of SUPERADM_FILES) {
       try {
-        const content = await fs.readFile(path.join(__dirname, filename), "utf8");
+        const content = await fsAsync.readFile(path.join(__dirname, filename), "utf8");
         results.push({ name: filename, content, lines: content.split("\n").length });
       } catch (_) {
         results.push({ name: filename, content: "(arquivo não encontrado)", lines: 0 });
@@ -2024,7 +2715,7 @@ async function createApp(dbOverride, evalDbOverride) {
 
   app.get("/api/superadmin/db", authRequired, superAdminOnly, async (_req, res) => {
     const tables = await db.all(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+      "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name"
     );
     const result = [];
     for (const t of tables) {
@@ -2044,7 +2735,7 @@ async function createApp(dbOverride, evalDbOverride) {
   app.get("/api/superadmin/db/:table", authRequired, superAdminOnly, async (req, res) => {
     const tableName = req.params.table.replace(/[^a-zA-Z0-9_]/g, "");
     const exists = await db.get(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name = ?", [tableName]
+      "SELECT table_name AS name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name = ?", [tableName]
     );
     if (!exists) return res.status(404).json({ error: "Tabela não encontrada" });
     const rows = await db.all(`SELECT * FROM "${tableName}" LIMIT 500`);
@@ -2057,7 +2748,7 @@ async function createApp(dbOverride, evalDbOverride) {
 
   // ── Anexos de tarefa ─────────────────────────────────────────────────────
   app.post("/api/tasks/:id/attachments", authRequired, upload.single("file"), async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: "Arquivo inválido ou muito grande (máx 300KB)" });
+    if (!req.file) return res.status(400).json({ error: "Arquivo inválido ou muito grande (máx 80MB)" });
     const taskId = Number(req.params.id);
     const scope = await buildVisibleScope(db, req.user);
     const task = await db.get("SELECT project_id FROM tasks WHERE id = ?", [taskId]);
@@ -2067,9 +2758,10 @@ async function createApp(dbOverride, evalDbOverride) {
       return res.status(403).json({ error: "Sem permissão" });
     }
     const r = await db.run(
-      "INSERT INTO task_attachments (task_id, filename, original_name, mime_type, size, uploaded_by) VALUES (?,?,?,?,?,?)",
-      [taskId, req.file.filename, req.file.originalname, req.file.mimetype, req.file.size, req.user.name]
+      "INSERT INTO task_attachments (task_id, filename, original_name, mime_type, size, uploaded_by, uploaded_by_user_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [taskId, req.file.filename, req.file.originalname, req.file.mimetype, req.file.size, req.user.name, req.user.id]
     );
+    await logTaskAudit(db, taskId, req.user.name, "anexo", null, req.file.originalname);
     return res.status(201).json({ id: r.lastID, filename: req.file.filename, originalName: req.file.originalname, mimeType: req.file.mimetype, size: req.file.size, uploadedBy: req.user.name });
   });
 
@@ -2089,11 +2781,21 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!task || !scope.projectIds.has(task.project_id)) return res.status(403).json({ error: "Sem permissão" });
     const att = await db.get("SELECT * FROM task_attachments WHERE id = ? AND task_id = ?", [req.params.aid, taskId]);
     if (!att) return res.status(404).json({ error: "Arquivo não encontrado" });
+    if (path.basename(att.filename) !== att.filename) {
+      return res.status(400).json({ error: "Nome de arquivo inválido" });
+    }
     const filePath = path.join(UPLOAD_DIR, att.filename);
     if (!fs.existsSync(filePath)) return res.status(404).json({ error: "Arquivo removido do servidor" });
     res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(att.original_name)}"`);
     res.setHeader("Content-Type", att.mime_type);
-    res.sendFile(filePath);
+    const stream = fs.createReadStream(filePath);
+    stream.on("error", (streamErr) => {
+      if (!res.headersSent) {
+        console.error("[DOWNLOAD] stream error", streamErr.code, att.filename);
+        res.status(streamErr.code === "ENOENT" ? 404 : 500).json({ error: "Erro ao baixar arquivo" });
+      }
+    });
+    stream.pipe(res);
   });
 
   app.delete("/api/tasks/:id/attachments/:aid", authRequired, async (req, res) => {
@@ -2106,6 +2808,7 @@ async function createApp(dbOverride, evalDbOverride) {
     const filePath = path.join(UPLOAD_DIR, att.filename);
     if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
     await db.run("DELETE FROM task_attachments WHERE id = ?", [att.id]);
+    await logTaskAudit(db, taskId, req.user.name, "anexo_removido", att.original_name, null);
     return res.json({ ok: true });
   });
 
@@ -2169,7 +2872,12 @@ async function createApp(dbOverride, evalDbOverride) {
     const scope = await buildVisibleScope(db, req.user);
     if (!scope.projectIds.has(projectId)) return res.status(403).json({ error: "Sem permissão" });
     // Somente PO ou professor pode submeter
-    const isPO = (await db.get("SELECT 1 FROM project_members WHERE project_id=? AND member_name=? AND scrum_role='Product Owner'", [projectId, req.user.name]));
+    const isPO = await db.get(
+      `SELECT 1 FROM project_members WHERE project_id = ? AND scrum_role = 'Product Owner'
+       AND (user_id = ? OR (user_id IS NULL AND member_name = ?
+       AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = member_name) = 1))`,
+      [projectId, req.user.id, req.user.name]
+    );
     if (!isPO && req.user.role !== "professor" && !req.user.isAdmin) return res.status(403).json({ error: "Somente o Product Owner pode submeter o documento" });
     await db.run(
       "INSERT INTO project_docs (project_id,doc_type,content,approval_status) VALUES (?,?,?,?) ON CONFLICT(project_id,doc_type) DO UPDATE SET approval_status='submitted', rejected_reason=NULL, approved_by=NULL, approved_at=NULL",
@@ -2184,6 +2892,8 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!["tap","pi"].includes(type)) return res.status(400).json({ error: "Tipo inválido" });
     if (req.user.role !== "professor" && !req.user.isAdmin) return res.status(403).json({ error: "Somente professor pode aprovar" });
     const projectId = Number(req.params.id);
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
     await db.run(
       "UPDATE project_docs SET approval_status='approved', approved_by=?, approved_at=?, rejected_reason=NULL WHERE project_id=? AND doc_type=?",
       [req.user.name, new Date().toISOString(), projectId, type]
@@ -2197,6 +2907,8 @@ async function createApp(dbOverride, evalDbOverride) {
     if (!["tap","pi"].includes(type)) return res.status(400).json({ error: "Tipo inválido" });
     if (req.user.role !== "professor" && !req.user.isAdmin) return res.status(403).json({ error: "Somente professor pode rejeitar" });
     const projectId = Number(req.params.id);
+    if (!req.user.isAdmin && !await professorOwnsProject(db, req.user.id, projectId))
+      return res.status(403).json({ error: "Você não é o professor responsável por este projeto" });
     const reason = sanitize(String(req.body?.reason || "").trim(), 500);
     await db.run(
       "UPDATE project_docs SET approval_status='rejected', rejected_reason=?, approved_by=NULL, approved_at=NULL WHERE project_id=? AND doc_type=?",
@@ -2208,7 +2920,18 @@ async function createApp(dbOverride, evalDbOverride) {
 
   // ── Permissões de documento por turma ────────────────────────────────────
   app.get("/api/docs/permissions", authRequired, async (req, res) => {
-    const rows = await db.all("SELECT dp.*, t.turma, t.curso, t.periodo FROM doc_permissions dp JOIN turmas t ON t.id = dp.turma_id");
+    // Admin: vê tudo. Professor: vê apenas suas turmas. Aluno: 403.
+    if (!req.user.isAdmin && req.user.role !== "professor")
+      return res.status(403).json({ error: "Sem permissão" });
+    let rows;
+    if (req.user.isAdmin) {
+      rows = await db.all("SELECT dp.*, t.turma, t.curso, t.periodo FROM doc_permissions dp JOIN turmas t ON t.id = dp.turma_id");
+    } else {
+      rows = await db.all(
+        "SELECT dp.*, t.turma, t.curso, t.periodo FROM doc_permissions dp JOIN turmas t ON t.id = dp.turma_id WHERE t.professor_id = ?",
+        [req.user.id]
+      );
+    }
     return res.json(rows);
   });
 
@@ -2217,6 +2940,11 @@ async function createApp(dbOverride, evalDbOverride) {
     const type = req.params.type;
     if (!["tap","pi"].includes(type)) return res.status(400).json({ error: "Tipo inválido" });
     const turmaId = Number(req.params.turmaId);
+    // Professor só pode liberar turmas que ele mesmo criou
+    if (!req.user.isAdmin) {
+      const ownsTurma = await db.get("SELECT 1 FROM turmas WHERE id = ? AND professor_id = ?", [turmaId, req.user.id]);
+      if (!ownsTurma) return res.status(403).json({ error: "Você não é responsável por esta turma" });
+    }
     await db.run("INSERT OR IGNORE INTO doc_permissions (turma_id,doc_type,released_by) VALUES (?,?,?)", [turmaId, type, req.user.id]);
     return res.json({ ok: true });
   });
@@ -2225,7 +2953,13 @@ async function createApp(dbOverride, evalDbOverride) {
     if (req.user.role !== "professor" && !req.user.isAdmin) return res.status(403).json({ error: "Sem permissão" });
     const type = req.params.type;
     if (!["tap","pi"].includes(type)) return res.status(400).json({ error: "Tipo inválido" });
-    await db.run("DELETE FROM doc_permissions WHERE turma_id=? AND doc_type=?", [req.params.turmaId, type]);
+    const turmaId = Number(req.params.turmaId);
+    // Professor só pode bloquear turmas que ele mesmo criou
+    if (!req.user.isAdmin) {
+      const ownsTurma = await db.get("SELECT 1 FROM turmas WHERE id = ? AND professor_id = ?", [turmaId, req.user.id]);
+      if (!ownsTurma) return res.status(403).json({ error: "Você não é responsável por esta turma" });
+    }
+    await db.run("DELETE FROM doc_permissions WHERE turma_id=? AND doc_type=?", [turmaId, type]);
     return res.json({ ok: true });
   });
 
@@ -2256,8 +2990,444 @@ async function createApp(dbOverride, evalDbOverride) {
     return res.status(201).json(msg);
   });
 
+  // ════════════════════════════════════════════════════════════════════════
+  //  INTEGRAÇÃO GITHUB (primeira versão — base segura)
+  // ════════════════════════════════════════════════════════════════════════
+
+  // Processa eventos relevantes para popular integração/repos (best-effort)
+  async function _processGithubEvent(eventType, body) {
+    if (eventType !== "installation" && eventType !== "installation_repositories") return;
+    const inst = body.installation;
+    if (!inst || !inst.id) return;
+    const acct = inst.account || {};
+    const status = body.action === "deleted" ? "removed" : (body.action === "suspend" ? "suspended" : "active");
+    await db.run(
+      `INSERT INTO github_integrations (installation_id, github_account_login, github_account_id, status, updated_at)
+       VALUES (?,?,?,?,datetime('now'))
+       ON CONFLICT(installation_id) DO UPDATE SET github_account_login=excluded.github_account_login,
+         github_account_id=excluded.github_account_id, status=excluded.status, updated_at=datetime('now')`,
+      [inst.id, acct.login || null, acct.id || null, status]
+    );
+    const integ = await db.get("SELECT id, user_id FROM github_integrations WHERE installation_id = ?", [inst.id]);
+    if (!integ) return;
+    // Se a integração já está vinculada a um usuário, registra o login do GitHub dele
+    if (integ.user_id && acct.login) {
+      await db.run("UPDATE users SET github_login = ? WHERE id = ? AND (github_login IS NULL OR github_login = '')",
+        [acct.login, integ.user_id]);
+    }
+    const reposAdd = body.repositories || body.repositories_added || [];
+    for (const r of reposAdd) {
+      const [owner, name] = String(r.full_name || "/").split("/");
+      await db.run(
+        `INSERT INTO github_repositories (integration_id, github_repo_id, owner, name, full_name, private, html_url, updated_at)
+         VALUES (?,?,?,?,?,?,?,datetime('now'))
+         ON CONFLICT(integration_id, github_repo_id) DO UPDATE SET full_name=excluded.full_name,
+           private=excluded.private, updated_at=datetime('now')`,
+        [integ.id, r.id || null, owner || null, name || null, r.full_name || null, r.private ? 1 : 0,
+         r.html_url || (r.full_name ? `https://github.com/${r.full_name}` : null)]
+      );
+    }
+    for (const r of (body.repositories_removed || [])) {
+      await db.run("DELETE FROM github_repositories WHERE integration_id = ? AND github_repo_id = ?", [integ.id, r.id]);
+    }
+  }
+
+  // Webhook — recebe eventos do GitHub (SEM auth; validado por assinatura HMAC)
+  app.post("/api/integrations/github/webhook", async (req, res) => {
+    const secret = process.env.GITHUB_WEBHOOK_SECRET;
+    if (!secret) return res.status(503).json({ error: "Webhook GitHub não configurado" });
+    const signature = req.headers["x-hub-signature-256"];
+    const delivery = req.headers["x-github-delivery"];
+    const eventType = req.headers["x-github-event"];
+    const raw = req.rawBody;
+    if (!signature || !raw || !Buffer.isBuffer(raw)) return res.status(401).json({ error: "Assinatura ou corpo ausente" });
+    const expected = "sha256=" + crypto.createHmac("sha256", secret).update(raw).digest("hex");
+    const sigBuf = Buffer.from(String(signature));
+    const expBuf = Buffer.from(expected);
+    if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      return res.status(401).json({ error: "Assinatura inválida" });
+    }
+    // Dedup por X-GitHub-Delivery
+    if (delivery) {
+      const dup = await db.get("SELECT id FROM github_webhook_events WHERE github_delivery_id = ?", [delivery]);
+      if (dup) return res.status(200).json({ ok: true, duplicate: true });
+    }
+    const body = req.body || {};
+    const action = body.action || null;
+    const repoFull = (body.repository && body.repository.full_name) || null;
+    try {
+      await db.run(
+        `INSERT INTO github_webhook_events (github_delivery_id, event_type, action, repository_full_name, payload_json, processed, processed_at)
+         VALUES (?,?,?,?,?,1,datetime('now'))`,
+        [delivery || null, eventType || null, action, repoFull, JSON.stringify(body)]
+      );
+    } catch (e) {
+      if (String(e.message).includes("UNIQUE")) return res.status(200).json({ ok: true, duplicate: true });
+      throw e;
+    }
+    try { await _processGithubEvent(eventType, body); } catch (e) { console.warn("[github webhook] process:", e.message); }
+    return res.status(200).json({ ok: true });
+  });
+
+  // Iniciar conexão — retorna a URL de instalação do GitHub App
+  app.get("/api/integrations/github/connect", authRequired, async (req, res) => {
+    const slug = process.env.GITHUB_APP_SLUG;
+    if (!slug) return res.status(503).json({ error: "GitHub App não configurado (defina GITHUB_APP_SLUG no .env)" });
+    const state = jwt.sign({ uid: req.user.id, t: "gh-connect" }, JWT_SECRET, { expiresIn: "15m" });
+    return res.json({ installUrl: `https://github.com/apps/${encodeURIComponent(slug)}/installations/new?state=${state}` });
+  });
+
+  // Callback da instalação (redirect do GitHub no navegador)
+  app.get("/integrations/github/callback", async (req, res) => {
+    const installationId = req.query.installation_id;
+    let userId = null;
+    try { const d = jwt.verify(String(req.query.state || ""), JWT_SECRET); if (d.t === "gh-connect") userId = d.uid; } catch (_) {}
+    if (!userId) { try { const tok = req.cookies[TOKEN_COOKIE]; if (tok) userId = jwt.verify(tok, JWT_SECRET).id; } catch (_) {} }
+    if (installationId && userId) {
+      await db.run(
+        `INSERT INTO github_integrations (installation_id, user_id, status, updated_at)
+         VALUES (?,?, 'active', datetime('now'))
+         ON CONFLICT(installation_id) DO UPDATE SET user_id=excluded.user_id, status='active', updated_at=datetime('now')`,
+        [installationId, userId]
+      );
+      // Vincula o login do GitHub ao usuário (para atribuir as estatísticas)
+      const integ = await db.get("SELECT github_account_login FROM github_integrations WHERE installation_id = ?", [installationId]);
+      if (integ && integ.github_account_login) {
+        await db.run("UPDATE users SET github_login = ? WHERE id = ? AND (github_login IS NULL OR github_login = '')",
+          [integ.github_account_login, userId]);
+      }
+      return res.redirect("/integracoes?connected=1");
+    }
+    return res.redirect("/integracoes?error=callback");
+  });
+
+  // Status da integração do usuário logado
+  app.get("/api/integrations/github", authRequired, async (req, res) => {
+    const integ = await db.get(
+      "SELECT id, github_account_login, installation_id, status, created_at FROM github_integrations WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+      [req.user.id]
+    );
+    const configured = Boolean(process.env.GITHUB_APP_SLUG && process.env.GITHUB_WEBHOOK_SECRET);
+    if (!integ) return res.json({ connected: false, configured });
+    return res.json({ connected: integ.status === "active", configured, account: integ.github_account_login, installationId: integ.installation_id, status: integ.status });
+  });
+
+  // Repositórios disponíveis na integração do usuário
+  app.get("/api/integrations/github/repositories", authRequired, async (req, res) => {
+    const integ = await db.get("SELECT id FROM github_integrations WHERE user_id = ? ORDER BY id DESC LIMIT 1", [req.user.id]);
+    if (!integ) return res.json([]);
+    const repos = await db.all(
+      "SELECT id, github_repo_id, owner, name, full_name, private, default_branch, html_url FROM github_repositories WHERE integration_id = ? ORDER BY full_name",
+      [integ.id]
+    );
+    return res.json(repos.map((r) => ({ ...r, private: !!r.private })));
+  });
+
+  // Vincular um repositório a um projeto
+  app.post("/api/integrations/github/projects/:projectId/link", authRequired, async (req, res) => {
+    const projectId = Number(req.params.projectId);
+    const { githubRepositoryId } = req.body || {};
+    const scope = await buildVisibleScope(db, req.user);
+    if (!scope.projectIds.has(projectId)) return res.status(403).json({ error: "Sem permissão neste projeto" });
+    const repo = await db.get("SELECT id FROM github_repositories WHERE id = ?", [githubRepositoryId]);
+    if (!repo) return res.status(404).json({ error: "Repositório não encontrado" });
+
+    const isStaff = req.user.role === "professor" || req.user.isAdmin;
+    // Aluno só pode vincular UMA vez por projeto — depois é necessário o professor desvincular
+    if (!isStaff) {
+      const existing = await db.get(
+        "SELECT id FROM project_github_repositories WHERE project_id = ? AND linked_by_user_id = ? AND is_active = 1",
+        [projectId, req.user.id]
+      );
+      if (existing) {
+        return res.status(409).json({ error: "Você já vinculou um repositório a este projeto. Para alterar, peça ao professor para desvincular." });
+      }
+    }
+    await db.run(
+      `INSERT INTO project_github_repositories (project_id, github_repository_id, linked_by_user_id, is_active, updated_at)
+       VALUES (?,?,?,1,datetime('now'))
+       ON CONFLICT(project_id, github_repository_id) DO UPDATE SET is_active=1, linked_by_user_id=excluded.linked_by_user_id, updated_at=datetime('now')`,
+      [projectId, githubRepositoryId, req.user.id]
+    );
+    return res.json({ ok: true });
+  });
+
+  // Lista os vínculos repo↔projeto (com quem vinculou) — para a UI saber o estado
+  app.get("/api/integrations/github/links", authRequired, async (req, res) => {
+    const scope = await buildVisibleScope(db, req.user);
+    const ids = Array.from(scope.projectIds);
+    if (!ids.length) return res.json([]);
+    const ph = ids.map(() => "?").join(",");
+    const rows = await db.all(
+      `SELECT pgr.id, pgr.project_id, pgr.linked_by_user_id, pgr.is_active,
+              r.full_name AS repo_full_name, p.name AS project_name, u.name AS linked_by_name
+         FROM project_github_repositories pgr
+         JOIN github_repositories r ON r.id = pgr.github_repository_id
+         JOIN projects p ON p.id = pgr.project_id
+         LEFT JOIN users u ON u.id = pgr.linked_by_user_id
+        WHERE pgr.is_active = 1 AND pgr.project_id IN (${ph})
+        ORDER BY p.name`,
+      ids
+    );
+    return res.json(rows.map(r => ({
+      id: r.id, projectId: r.project_id, projectName: r.project_name,
+      repoFullName: r.repo_full_name, linkedByUserId: r.linked_by_user_id, linkedByName: r.linked_by_name,
+      isMine: r.linked_by_user_id === req.user.id,
+    })));
+  });
+
+  // Desvincular repo↔projeto — APENAS professor/ADM
+  app.delete("/api/integrations/github/links/:linkId", authRequired, async (req, res) => {
+    if (req.user.role !== "professor" && !req.user.isAdmin) {
+      return res.status(403).json({ error: "Apenas professores e administradores podem desvincular." });
+    }
+    const link = await db.get("SELECT pgr.id, pgr.project_id FROM project_github_repositories pgr WHERE pgr.id = ?", [req.params.linkId]);
+    if (!link) return res.status(404).json({ error: "Vínculo não encontrado" });
+    const scope = await buildVisibleScope(db, req.user);
+    if (!scope.projectIds.has(link.project_id)) return res.status(403).json({ error: "Sem permissão neste projeto" });
+    await db.run("DELETE FROM project_github_repositories WHERE id = ?", [req.params.linkId]);
+    return res.json({ ok: true });
+  });
+
+  // Últimos eventos recebidos (admin vê todos; usuário vê os dos seus repositórios)
+  app.get("/api/integrations/github/events", authRequired, async (req, res) => {
+    let rows;
+    if (req.user.isAdmin) {
+      rows = await db.all("SELECT id, github_delivery_id, event_type, action, repository_full_name, processed, created_at FROM github_webhook_events ORDER BY id DESC LIMIT 30");
+    } else {
+      const integ = await db.get("SELECT id FROM github_integrations WHERE user_id = ? ORDER BY id DESC LIMIT 1", [req.user.id]);
+      if (!integ) return res.json([]);
+      rows = await db.all(
+        `SELECT id, github_delivery_id, event_type, action, repository_full_name, processed, created_at
+         FROM github_webhook_events
+         WHERE repository_full_name IN (SELECT full_name FROM github_repositories WHERE integration_id = ?)
+         ORDER BY id DESC LIMIT 30`,
+        [integ.id]
+      );
+    }
+    return res.json(rows);
+  });
+
+  // Agrega commits e PRs a partir dos eventos de webhook armazenados (fallback sem GitHub App)
+  async function _statsFromWebhookEvents(login, since) {
+    const loginLower = login.toLowerCase();
+    const events = await db.all(
+      `SELECT event_type, payload_json FROM github_webhook_events
+       WHERE event_type IN ('push','pull_request') AND datetime(created_at) >= datetime(?)`,
+      [since]
+    );
+    let commits = 0, prsOpened = 0, prsMerged = 0;
+    for (const ev of events) {
+      let body;
+      try { body = JSON.parse(ev.payload_json); } catch (_) { continue; }
+      if (ev.event_type === "push") {
+        const sender = (body.sender?.login || body.pusher?.name || "").toLowerCase();
+        if (sender !== loginLower) continue;
+        commits += (Array.isArray(body.commits) ? body.commits : []).length;
+      } else if (ev.event_type === "pull_request") {
+        const prLogin = (body.pull_request?.user?.login || "").toLowerCase();
+        if (prLogin !== loginLower) continue;
+        if (body.action === "opened") prsOpened += 1;
+        if (body.action === "closed" && body.pull_request?.merged === true) prsMerged += 1;
+      }
+    }
+    return { commits, prsOpened, prsMerged };
+  }
+
+  // Calcula as contribuições GitHub de um usuário (mês atual) somando todos os
+  // repositórios vinculados aos projetos onde ele participa.
+  async function computeUserGithubStats(user) {
+    const { since, period } = currentMonthRange();
+    const login = user.github_login;
+    const monthStart = new Date(since).getTime();
+
+    // Tarefas concluídas no PILHA (sempre disponível, independe do GitHub)
+    const taskRow = await db.get(
+      "SELECT COUNT(*) AS n FROM tasks WHERE assignee = ? AND status IN ('concluido','done')",
+      [user.name]
+    );
+
+    const result = {
+      period, githubLogin: login || null, userName: user.name,
+      commits: 0, prsOpened: 0, prsMerged: 0, reviews: 0,
+      tasksDone: taskRow ? taskRow.n : 0, filesChanged: 0, linesAdded: 0, linesRemoved: 0,
+      repos: [], githubError: null,
+      githubConfigured: Boolean(process.env.GITHUB_APP_ID && process.env.GITHUB_PRIVATE_KEY),
+    };
+    if (!login) { result.githubError = "sem_login"; return result; }
+    if (!result.githubConfigured) {
+      result.githubError = "app_nao_configurado";
+      try {
+        const wh = await _statsFromWebhookEvents(login, since);
+        result.commits = wh.commits;
+        result.prsOpened = wh.prsOpened;
+        result.prsMerged = wh.prsMerged;
+        result.githubSource = "webhook_events";
+      } catch (_) {}
+      return result;
+    }
+
+    // Repositórios vinculados a projetos onde o usuário é membro OU que ele mesmo vinculou
+    const repos = await db.all(
+      `SELECT DISTINCT r.owner, r.name, r.full_name, gi.installation_id
+         FROM project_github_repositories pgr
+         JOIN github_repositories r ON r.id = pgr.github_repository_id
+         JOIN github_integrations gi ON gi.id = r.integration_id
+        WHERE pgr.is_active = 1
+          AND (
+            pgr.linked_by_user_id = ?
+            OR pgr.project_id IN (
+              SELECT project_id FROM project_members
+               WHERE user_id = ? OR (user_id IS NULL AND member_name = ?)
+            )
+          )`,
+      [user.id, user.id, user.name]
+    );
+    if (!repos.length) { result.githubError = result.githubError || "sem_repo_vinculado"; return result; }
+
+    const filesGlobal = new Set();
+    for (const repo of repos) {
+      if (!repo.owner || !repo.name || !repo.installation_id) continue;
+      try {
+        const token = await githubInstallationToken(repo.installation_id);
+        if (!token) { result.githubError = "sem_token"; continue; }
+        const base = `/repos/${repo.owner}/${repo.name}`;
+
+        // Commits do autor no mês — contagem vem da LISTA (não depende do detalhe)
+        const commits = await githubApi(token, `${base}/commits?author=${encodeURIComponent(login)}&since=${since}&per_page=100`);
+        const list = Array.isArray(commits) ? commits : [];
+        result.commits += list.length;
+        // Detalhes (linhas + arquivos) — best-effort, não afeta a contagem de commits
+        for (const c of list.slice(0, 100)) {
+          try {
+            const det = await githubApi(token, `${base}/commits/${c.sha}`);
+            if (det.stats) { result.linesAdded += det.stats.additions || 0; result.linesRemoved += det.stats.deletions || 0; }
+            for (const f of det.files || []) if (f.filename) filesGlobal.add(`${repo.full_name}:${f.filename}`);
+          } catch (_) { /* ignora commit individual que falhar */ }
+        }
+
+        // Pull requests (lista) → abertos/mergeados no mês pelo autor
+        const pulls = await githubApi(token, `${base}/pulls?state=all&per_page=100&sort=created&direction=desc`);
+        for (const pr of pulls || []) {
+          if (!pr.user || pr.user.login !== login) continue;
+          if (pr.created_at && new Date(pr.created_at).getTime() >= monthStart) result.prsOpened += 1;
+          if (pr.merged_at && new Date(pr.merged_at).getTime() >= monthStart) result.prsMerged += 1;
+        }
+
+        // Reviews feitas pelo login (em PRs atualizados no mês)
+        const recent = (pulls || []).filter((pr) => pr.updated_at && new Date(pr.updated_at).getTime() >= monthStart).slice(0, 30);
+        for (const pr of recent) {
+          try {
+            const reviews = await githubApi(token, `${base}/pulls/${pr.number}/reviews`);
+            result.reviews += (reviews || []).filter((rv) => rv.user && rv.user.login === login && rv.submitted_at && new Date(rv.submitted_at).getTime() >= monthStart).length;
+          } catch (_) {}
+        }
+        result.repos.push(repo.full_name);
+      } catch (e) {
+        // só marca erro se nenhum repo teve sucesso (não mascara dados válidos)
+        if (!result.repos.length) result.githubError = e.status === 403 ? "limite_ou_permissao" : "erro_api";
+      }
+    }
+    result.filesChanged = filesGlobal.size;
+    result.reposConsidered = result.repos.length;
+    if (result.repos.length) result.githubError = null; // pelo menos um repo OK
+    return result;
+  }
+
+  function _ghStatsFromRow(row, user, period) {
+    return {
+      period, githubLogin: user.github_login || null, userName: user.name,
+      commits: row.commits, prsOpened: row.prs_opened, prsMerged: row.prs_merged, reviews: row.reviews,
+      tasksDone: row.tasks_done, filesChanged: row.files_changed, linesAdded: row.lines_added, linesRemoved: row.lines_removed,
+      cached: true, computedAt: row.computed_at,
+      githubConfigured: Boolean(process.env.GITHUB_APP_ID && process.env.GITHUB_PRIVATE_KEY),
+    };
+  }
+
+  // Estatísticas de contribuição de um usuário (com cache/TTL)
+  app.get("/api/users/:id/contributions", authRequired, async (req, res) => {
+    const targetId = Number(req.params.id);
+    const target = await db.get("SELECT id, name, role, github_login FROM users WHERE id = ?", [targetId]);
+    if (!target) return res.status(404).json({ error: "Usuário não encontrado" });
+    if (req.user.id !== targetId && req.user.role !== "professor" && !req.user.isAdmin) {
+      return res.status(403).json({ error: "Sem permissão" });
+    }
+    const { period } = currentMonthRange();
+    const refresh = req.query.refresh === "1";
+    const cached = await db.get("SELECT * FROM github_user_stats WHERE user_id = ? AND period = ?", [targetId, period]);
+    const TTL = 10 * 60 * 1000;
+    if (cached && !refresh) {
+      const age = Date.now() - new Date(String(cached.computed_at).replace(" ", "T") + "Z").getTime();
+      if (age < TTL) return res.json(_ghStatsFromRow(cached, target, period));
+    }
+    let stats;
+    try { stats = await computeUserGithubStats(target); }
+    catch (e) { return res.json({ period, githubLogin: target.github_login, userName: target.name, error: "falha_calculo", message: e.message }); }
+    await db.run(
+      `INSERT INTO github_user_stats (user_id, period, commits, prs_opened, prs_merged, reviews, tasks_done, files_changed, lines_added, lines_removed, computed_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,datetime('now'))
+       ON CONFLICT(user_id, period) DO UPDATE SET commits=excluded.commits, prs_opened=excluded.prs_opened, prs_merged=excluded.prs_merged,
+         reviews=excluded.reviews, tasks_done=excluded.tasks_done, files_changed=excluded.files_changed,
+         lines_added=excluded.lines_added, lines_removed=excluded.lines_removed, computed_at=datetime('now')`,
+      [targetId, period, stats.commits, stats.prsOpened, stats.prsMerged, stats.reviews, stats.tasksDone, stats.filesChanged, stats.linesAdded, stats.linesRemoved]
+    );
+    return res.json(stats);
+  });
+
+  // Define manualmente o usuário do GitHub (próprio, ou professor/admin para outros)
+  app.patch("/api/users/:id/github-login", authRequired, async (req, res) => {
+    const targetId = Number(req.params.id);
+    if (req.user.id !== targetId && req.user.role !== "professor" && !req.user.isAdmin) {
+      return res.status(403).json({ error: "Sem permissão" });
+    }
+    const login = String((req.body && req.body.githubLogin) || "").trim().replace(/^@/, "").slice(0, 100);
+    await db.run("UPDATE users SET github_login = ? WHERE id = ?", [login || null, targetId]);
+    return res.json({ ok: true, githubLogin: login || null });
+  });
+
+  // ── Notificações persistentes ────────────────────────────────────────────────
+  app.get("/api/notifications", authRequired, async (req, res) => {
+    const rows = await db.all(
+      "SELECT id, type, message, link, is_read, created_at FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 50",
+      [req.user.id]
+    );
+    return res.json(rows);
+  });
+
+  app.patch("/api/notifications/read-all", authRequired, async (req, res) => {
+    await db.run("UPDATE notifications SET is_read = 1 WHERE user_id = ?", [req.user.id]);
+    return res.json({ ok: true });
+  });
+
+  app.patch("/api/notifications/:id/read", authRequired, async (req, res) => {
+    await db.run(
+      "UPDATE notifications SET is_read = 1 WHERE id = ? AND user_id = ?",
+      [req.params.id, req.user.id]
+    );
+    return res.json({ ok: true });
+  });
+
+  // Atividade recente — movimentações de status das tarefas (para o Dashboard)
+  app.get("/api/activity/recent", authRequired, async (req, res) => {
+    const scope = await buildVisibleScope(db, req.user);
+    const ids = Array.from(scope.projectIds);
+    if (!ids.length) return res.json([]);
+    const ph = ids.map(() => "?").join(",");
+    const rows = await db.all(
+      `SELECT a.id, a.task_id, a.user_name, a.field, a.old_val, a.new_val, a.created_at, t.title
+         FROM task_audit a JOIN tasks t ON t.id = a.task_id
+        WHERE t.project_id IN (${ph}) AND a.field = 'status'
+        ORDER BY a.id DESC LIMIT 15`,
+      ids
+    );
+    return res.json(rows.map((r) => ({
+      id: r.id, taskId: String(r.task_id), title: r.title,
+      userName: r.user_name, oldVal: r.old_val, newVal: r.new_val, createdAt: r.created_at,
+    })));
+  });
+
   // ── SPA fallback — DEVE ficar após TODAS as rotas de API ────────────────
-  const APP_ROUTES = new Set(["/dashboard","/projetos","/scrum","/kanban","/tap","/pi","/turmas","/chat","/equipes","/avaliacao","/admin","/superadmin"]);
+  const APP_ROUTES = new Set(["/dashboard","/projetos","/scrum","/kanban","/tap","/pi","/turmas","/chat","/equipes","/avaliacao","/admin","/superadmin","/integracoes"]);
   const APP_ROUTE_PATTERNS = [/^\/projetos\/\d+$/];
   app.get("*", (req, res) => {
     if (req.path.startsWith("/api/")) return res.status(404).json({ error: "Rota não encontrada" });
@@ -2268,7 +3438,7 @@ async function createApp(dbOverride, evalDbOverride) {
   // ── Global error handler ─────────────────────────────────────────────────
   // eslint-disable-next-line no-unused-vars
   app.use((err, _req, res, _next) => {
-    if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "Arquivo muito grande (máx 300KB)" });
+    if (err.code === "LIMIT_FILE_SIZE") return res.status(413).json({ error: "Arquivo muito grande (máx 80MB)" });
     console.error("[SERVER_ERROR]", err);
     res.status(500).json({ error: "Erro interno do servidor" });
   });
@@ -2294,14 +3464,38 @@ async function createApp(dbOverride, evalDbOverride) {
 
     io.on("connection", (socket) => {
       const user = socket.user;
-      // Aluno/professor entra nas salas dos seus projetos
-      db.all(
-        "SELECT project_id FROM project_members WHERE member_name = ?", [user.name]
-      ).then((rows) => {
-        rows.forEach((r) => socket.join(`project:${r.project_id}`));
-      }).catch(() => {});
-      // Professor entra em todas as salas de projetos
-      if (user.role === "professor" || user.isAdmin) {
+
+      // Toda conexão autenticada entra na sala pessoal user:{id}
+      // Isso permite notificações individuais dirigidas por user_id
+      socket.join(`user:${user.id}`);
+
+      // Aluno entra nas salas dos projetos dos quais é membro (user_id FK, fallback nome único)
+      if (user.role === "aluno") {
+        db.all(
+          `SELECT project_id FROM project_members WHERE user_id = ?
+           UNION
+           SELECT pm.project_id FROM project_members pm
+           WHERE pm.user_id IS NULL AND pm.member_name = ?
+           AND (SELECT COUNT(*) FROM users u2 WHERE u2.name = pm.member_name) = 1`,
+          [user.id, user.name]
+        ).then((rows) => {
+          rows.forEach((r) => socket.join(`project:${r.project_id}`));
+        }).catch(() => {});
+      }
+
+      // Professor entra SOMENTE nas salas de projetos das próprias turmas
+      // Nunca entra em projetos de turmas alheias
+      if (user.role === "professor" && !user.isAdmin) {
+        db.all(
+          "SELECT p.id FROM projects p INNER JOIN turmas t ON p.turma_id = t.id WHERE t.professor_id = ?",
+          [user.id]
+        ).then((rows) => {
+          rows.forEach((r) => socket.join(`project:${r.id}`));
+        }).catch(() => {});
+      }
+
+      // Admin entra em todos os projetos
+      if (user.isAdmin) {
         db.all("SELECT id FROM projects").then((rows) => {
           rows.forEach((r) => socket.join(`project:${r.id}`));
         }).catch(() => {});
@@ -2337,4 +3531,4 @@ if (require.main === module) {
   createApp().catch((err) => _startDiagServer(String(err?.stack || err)));
 }
 
-module.exports = { createApp };
+module.exports = { createApp, normalizeGithubPrivateKey, aggregateCommitDetails, currentMonthRange };

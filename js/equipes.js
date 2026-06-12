@@ -19,13 +19,37 @@ async function openProjectDetail(projectId) {
 
     // Info
     const fmt = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }) : "";
+    const isProf = state.currentUser?.role === "professor" || state.currentUser?.isAdmin;
+    const deadlineHtml = isProf
+      ? `<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;">
+           <span>📅 Prazo:</span>
+           <input type="date" id="pd-deadline-input" value="${p.deadline || ""}" style="border:1px solid var(--border);border-radius:var(--r);padding:.2rem .5rem;font-size:.82rem;" />
+           <button id="pd-deadline-save-btn" class="btn-primary btn-sm" style="font-size:.75rem;">Salvar</button>
+         </div>`
+      : (p.deadline ? `<span>📅 Prazo: <strong>${fmt(p.deadline)}</strong></span>` : "");
     const infoItems = [
       p.team     ? `<span>📚 Turma: <strong>${escapeHtml(p.team)}</strong></span>` : "",
       p.discipline ? `<span>📖 Disciplina: <strong>${escapeHtml(p.discipline)}</strong></span>` : "",
       p.startDate  ? `<span>🗓️ Início: <strong>${fmt(p.startDate)}</strong></span>` : "",
-      p.deadline   ? `<span>📅 Prazo: <strong>${fmt(p.deadline)}</strong></span>` : "",
+      deadlineHtml,
     ].filter(Boolean).join("");
     document.getElementById("pd-info").innerHTML = infoItems || "<span style='color:var(--muted)'>Sem informações adicionais.</span>";
+
+    // Listener do botão Salvar prazo (apenas professor/admin)
+    document.getElementById("pd-deadline-save-btn")?.addEventListener("click", async () => {
+      const input = document.getElementById("pd-deadline-input");
+      const newDeadline = input?.value;
+      if (!newDeadline) return;
+      try {
+        await apiFetch(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify({ deadline: newDeadline }) });
+        const proj = state.projects.find((x) => String(x.id) === String(projectId));
+        if (proj) proj.deadline = newDeadline;
+        if (typeof renderKanban === "function") renderKanban();
+        if (typeof renderStats === "function") renderStats();
+        input.style.borderColor = "var(--success, #22c55e)";
+        setTimeout(() => { if (input) input.style.borderColor = ""; }, 1500);
+      } catch (err) { alert(err.message); }
+    });
 
     document.getElementById("pd-title").textContent = p.name;
 
@@ -63,7 +87,7 @@ async function openProjectDetail(projectId) {
             <th style="padding:.3rem .5rem;">Status</th>
           </tr></thead>
           <tbody>${tasks.map((t) => `
-            <tr style="border-top:1px solid var(--border);">
+            <tr style="border-top:1px solid var(--border);cursor:pointer;" data-open-task="${t.id}">
               <td style="padding:.35rem .5rem;">${escapeHtml(t.title)}</td>
               <td style="padding:.35rem .5rem;">${escapeHtml(t.assignee)}</td>
               <td style="padding:.35rem .5rem;">${fmt(t.due_date)}</td>
@@ -72,8 +96,17 @@ async function openProjectDetail(projectId) {
           </tbody>
         </table>`
       : "<p style='color:var(--muted);font-size:.85rem;'>Nenhuma tarefa cadastrada.</p>";
+    // Tarefas clicáveis → abre modal de detalhe
+    document.getElementById("pd-tasks")?.addEventListener("click", (e) => {
+      const row = e.target.closest("[data-open-task]");
+      if (row && typeof openTaskDetail === "function") openTaskDetail(Number(row.dataset.openTask));
+    });
 
-    // Botões TAP / PI
+    // Botões TAP / PI — visíveis apenas se docs liberados (alunos) ou sempre (prof/admin)
+    // isProf já declarado acima nesta mesma função
+    const docBtnsEl = document.getElementById("pd-doc-btns");
+    if (docBtnsEl) docBtnsEl.style.display = (isProf || p.docsUnlocked) ? "flex" : "none";
+
     document.querySelectorAll(".pd-doc-btn").forEach((btn) => {
       btn.onclick = () => {
         const type = btn.dataset.doc;
@@ -87,6 +120,31 @@ async function openProjectDetail(projectId) {
         if (sel) { sel.value = String(projectId); loadDoc(type); }
       };
     });
+
+    // Painel de unlock de docs (professor/admin)
+    const unlockPanel = document.getElementById("pd-unlock-panel");
+    const unlockBtn   = document.getElementById("pd-unlock-btn");
+    const unlockStatus = document.getElementById("pd-unlock-status");
+    if (unlockPanel && isProf) {
+      unlockPanel.style.display = "";
+      let unlocked = p.docsUnlocked;
+      const refresh = () => {
+        unlockStatus.textContent = unlocked ? "Documentos liberados para os alunos" : "Documentos bloqueados para os alunos";
+        unlockBtn.textContent = unlocked ? "🔒 Bloquear" : "🔓 Liberar TAP e PI";
+        unlockBtn.className = unlocked ? "btn-secondary btn-sm" : "btn-primary btn-sm";
+        if (docBtnsEl) docBtnsEl.style.display = "flex";
+      };
+      refresh();
+      unlockBtn.onclick = async () => {
+        try {
+          const r = await apiFetch(`/api/projects/${projectId}/unlock-docs`, { method: "PATCH" });
+          unlocked = r.docsUnlocked;
+          refresh();
+        } catch (e) { alert(e.message); }
+      };
+    } else if (unlockPanel) {
+      unlockPanel.style.display = "none";
+    }
 
   } catch (err) { alert(err.message); }
 }
@@ -119,6 +177,8 @@ function renderEquipesAluno() {
   alunoGroupsEl.innerHTML = state.projects.map((p) => {
     const profiles = Array.isArray(p.memberProfiles) ? p.memberProfiles : [];
     const fmt = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }) : "";
+    const myProfile = profiles.find((m) => m.name === myName);
+    const isPO = myProfile?.role === "Product Owner";
 
     const memberListHtml = profiles.map((m) => {
       const initials = (m.name || "?").split(" ").map((n) => n[0]).slice(0, 2).join("").toUpperCase();
@@ -131,11 +191,17 @@ function renderEquipesAluno() {
         </div>`;
     }).join("");
 
+    // Botão de definir nome (só para PO quando nome não confirmado)
+    const nameBtnHtml = (isPO && !p.nameConfirmed)
+      ? `<button class="btn-outline-primary btn-sm pnm-open-btn" data-pid="${escapeHtml(p.id)}" data-pname="${escapeHtml(p.name)}" style="font-size:.75rem;letter-spacing:.04em;font-weight:600;">✏️ DEFINIR NOME DO PROJETO</button>`
+      : "";
+
     return `
       <article class="card group-project-card">
         <div class="group-project-header">
           <div class="group-project-title-row">
             <h3 class="group-project-name" style="flex:1;">${escapeHtml(p.name)}</h3>
+            ${nameBtnHtml}
             <span class="chip" style="background:var(--primary-faint,#4f6ef720);color:var(--primary,#4f6ef7);font-size:.7rem;">${profiles.length} membro${profiles.length !== 1 ? "s" : ""}</span>
           </div>
           <div class="group-project-meta">
@@ -148,6 +214,65 @@ function renderEquipesAluno() {
         <div class="group-member-list">${memberListHtml}</div>
       </article>`;
   }).join("");
+
+  // Ligar botões de definir nome após renderizar o HTML
+  alunoGroupsEl.querySelectorAll(".pnm-open-btn").forEach((btn) => {
+    btn.addEventListener("click", () => openNameModal(btn.dataset.pid, btn.dataset.pname));
+  });
+}
+
+function openNameModal(projectId, currentName) {
+  let modal = document.getElementById("project-name-modal");
+  if (!modal) {
+    modal = document.createElement("div");
+    modal.id = "project-name-modal";
+    modal.style.cssText = "position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45);";
+    modal.innerHTML = `
+      <div style="background:var(--surface,#fff);border-radius:var(--r-lg,12px);padding:2rem;width:min(480px,92vw);box-shadow:0 8px 32px rgba(0,0,0,.18);display:flex;flex-direction:column;gap:1.25rem;">
+        <h2 style="margin:0;font-size:1.1rem;font-weight:700;">Definir nome do projeto</h2>
+        <div>
+          <label style="font-size:.85rem;color:var(--muted);display:block;margin-bottom:.4rem;">Nome do projeto</label>
+          <input id="pnm-input" type="text" maxlength="120" style="width:100%;box-sizing:border-box;font-size:1rem;padding:.55rem .75rem;border:1.5px solid var(--line);border-radius:var(--r);outline:none;" placeholder="Ex: Sistema de Gestão de Estoque" />
+        </div>
+        <label style="display:flex;align-items:flex-start;gap:.6rem;font-size:.82rem;color:var(--muted);cursor:pointer;line-height:1.45;">
+          <input id="pnm-check" type="checkbox" style="width:18px;height:18px;min-width:18px;max-width:18px;margin:.15rem 0 0;padding:0;flex:0 0 18px;accent-color:var(--primary);" />
+          <span style="flex:1;">Estou ciente de que, após confirmar, o nome do projeto <strong style="color:var(--text);">só poderá ser alterado pelo professor responsável.</strong></span>
+        </label>
+        <div style="display:flex;gap:.75rem;justify-content:flex-end;">
+          <button class="btn-secondary" id="pnm-cancel">Cancelar</button>
+          <button class="btn-primary" id="pnm-confirm">Confirmar nome</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+  }
+
+  const input = modal.querySelector("#pnm-input");
+  const check = modal.querySelector("#pnm-check");
+  input.value = currentName;
+  check.checked = false;
+  modal.style.display = "flex";
+  input.focus();
+
+  modal.querySelector("#pnm-cancel").onclick = () => { modal.style.display = "none"; };
+  modal.onclick = (e) => { if (e.target === modal) modal.style.display = "none"; };
+
+  modal.querySelector("#pnm-confirm").onclick = async () => {
+    const name = input.value.trim();
+    if (!name) { input.focus(); return; }
+    if (!check.checked) { check.parentElement.style.color = "var(--danger,#c0392b)"; check.focus(); return; }
+    check.parentElement.style.color = "";
+    try {
+      await apiFetch(`/api/projects/${projectId}/confirm-name`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      modal.style.display = "none";
+      await loadData();
+      renderAll();
+      renderEquipesAluno();
+    } catch (e) { alert(e.message); }
+  };
 }
 
 // ── Equipes (admin) ───────────────────────────────────────
@@ -209,6 +334,17 @@ async function openMemberProfile(name) {
     set("mp-grad-row", u.graduations ? `<span class="mp-label">Graduações:</span> ${escapeHtml(u.graduations)}` : "");
     set("mp-spec-row", u.specialty ? `<span class="mp-label">Especialidades:</span> ${escapeHtml(u.specialty)}` : "");
     set("mp-exp-row", u.experience_years > 0 ? `<span class="mp-label">Experiência:</span> ${u.experience_years} anos` : "");
+
+    // Contribuições do GitHub (professor/admin/o próprio podem ver/editar o login)
+    const ghContainer = document.getElementById("mp-contributions");
+    if (ghContainer) {
+      if (u.id && typeof renderGithubContributions === "function") {
+        const canEdit = state.currentUser?.role === "professor" || state.currentUser?.isAdmin || u.name === state.currentUser?.name;
+        renderGithubContributions(u.id, ghContainer, { canEdit });
+      } else {
+        ghContainer.innerHTML = "";
+      }
+    }
 
     modal.showModal();
   } catch (err) { console.error(err); }
@@ -452,6 +588,7 @@ function renderEquipes(searchTerm = "", roleFilter = "all") {
             ${turmaStr ? `<span class="group-meta-pill">📚 ${escapeHtml(turmaStr)}${periodoStr ? " · " + escapeHtml(periodoStr) : ""}</span>` : ""}
             ${p.discipline ? `<span class="group-meta-pill">📖 ${escapeHtml(p.discipline)}</span>` : ""}
             ${startFormatted ? `<span class="group-meta-pill">🗓️ ${escapeHtml(startFormatted)}${deadlineFormatted ? " → " + escapeHtml(deadlineFormatted) : ""}</span>` : deadlineFormatted ? `<span class="group-meta-pill">🗓️ até ${escapeHtml(deadlineFormatted)}</span>` : ""}
+            ${isProf ? `<span class="group-meta-pill gp-deadline-pill">📅 Entrega: <input type="date" class="gp-deadline-input" data-project-id="${p.id}" value="${p.deadline || ""}" title="Data final do projeto (somente professor)" /></span>` : ""}
           </div>
           ${descEditHtml}
         </div>
@@ -541,12 +678,18 @@ function renderEquipes(searchTerm = "", roleFilter = "all") {
     btn.addEventListener("click", async () => {
       const type = btn.dataset.releaseType;
       const projectId = btn.dataset.projectId;
-      // Busca turma_id via projeto (members → turma do primeiro aluno)
+      // Usa turma_id direto do projeto (campo enviado pelo backend via FK)
       const proj = state.projects.find((x) => String(x.id) === String(projectId));
-      const memberName = proj?.memberProfiles?.[0]?.name;
-      const memberUser = memberName ? _allUsers.find((u) => u.name === memberName) : null;
-      const turmaId = memberUser?.turmaId || memberUser?.turma_id;
-      if (!turmaId) { alert("Não foi possível identificar a turma do projeto."); return; }
+      let turmaId = proj?.turma_id || null;
+      // Fallback: buscar via memberProfiles somente se turma_id não disponível
+      if (!turmaId) {
+        for (const mp of (proj?.memberProfiles || [])) {
+          const u = _allUsers.find((x) => x.name === mp.name);
+          const tid = u?.turmaId || u?.turma_id;
+          if (tid) { turmaId = tid; break; }
+        }
+      }
+      if (!turmaId) { alert("Não foi possível identificar a turma do projeto. Verifique se o projeto está vinculado a uma turma."); return; }
       const isReleased = btn.classList.contains("released");
       try {
         if (isReleased) {
@@ -558,6 +701,23 @@ function renderEquipes(searchTerm = "", roleFilter = "all") {
           btn.classList.add("released");
           btn.title = "Liberado";
         }
+      } catch (err) { alert(err.message); }
+    });
+  });
+
+  // ── Professor edita a data final do projeto ──────────────
+  alunoGroupsEl.querySelectorAll(".gp-deadline-input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const projectId = input.dataset.projectId;
+      const deadline = input.value;
+      if (!deadline) return;
+      try {
+        await apiFetch(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify({ deadline }) });
+        const p = state.projects.find((x) => String(x.id) === String(projectId));
+        if (p) p.deadline = deadline;
+        input.style.outline = "2px solid #16a34a";
+        setTimeout(() => { input.style.outline = ""; }, 1200);
+        if (typeof renderAll === "function") renderAll(); // atualiza barra de progresso etc.
       } catch (err) { alert(err.message); }
     });
   });
@@ -650,8 +810,10 @@ function renderScrumKanban() {
   const projectSel = document.querySelector("#scrum-project-select");
   if (!kanbanEl || !projectSel) return;
 
-  // populate project select
+  // populate project select — PRESERVA a seleção atual (senão volta sempre pro 1º)
+  const _cur = projectSel.value;
   projectSel.innerHTML = state.projects.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+  if (_cur && state.projects.find((p) => String(p.id) === _cur)) projectSel.value = _cur;
 
   const projectId = Number(projectSel.value) || state.projects[0]?.id;
   if (!projectId) { kanbanEl.innerHTML = `<p style="color:var(--muted)">Nenhum projeto disponível.</p>`; return; }

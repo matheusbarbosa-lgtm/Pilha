@@ -22,10 +22,21 @@
           <p id="pd-description" style="font-size:.875rem;white-space:pre-wrap;margin:0;color:var(--text);"></p>
         </article>
 
+        <!-- Painel de liberação de documentos (professor/admin) -->
+        <article class="card" id="pd-unlock-panel" style="padding:1rem 1.25rem;margin-bottom:1rem;display:none;">
+          <div class="card-head">
+            <h3 style="font-size:.9rem;">📄 Documentos do Projeto</h3>
+            <div style="display:flex;align-items:center;gap:.75rem;">
+              <span id="pd-unlock-status" style="font-size:.8rem;color:var(--muted);"></span>
+              <button class="btn-primary btn-sm" id="pd-unlock-btn"></button>
+            </div>
+          </div>
+        </article>
+
         <article class="card" style="padding:1rem 1.25rem;margin-bottom:1rem;">
           <div class="card-head" style="margin-bottom:0.75rem;">
             <h3 style="font-size:.9rem;">Tarefas</h3>
-            <div style="display:flex;gap:.5rem;">
+            <div id="pd-doc-btns" style="display:flex;gap:.5rem;">
               <button class="btn-secondary btn-sm pd-doc-btn" data-doc="tap">📄 Abrir TAP</button>
               <button class="btn-secondary btn-sm pd-doc-btn" data-doc="pi">📄 Abrir PI</button>
             </div>

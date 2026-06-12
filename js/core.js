@@ -249,19 +249,28 @@ function isSuperAdmin() {
 
 // ── API ───────────────────────────────────────────────────
 const SESSION_TOKEN_KEY = "pilha_tab_token";
+const CSRF_MUTATING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+function getCsrfToken() {
+  const match = document.cookie.split(";").find(c => c.trim().startsWith("csrf_token="));
+  return match ? decodeURIComponent(match.trim().slice("csrf_token=".length)) : null;
+}
 
 async function apiFetch(path, options = {}) {
   const tabToken = sessionStorage.getItem(SESSION_TOKEN_KEY);
+  const method = (options.method || "GET").toUpperCase();
+  const csrfToken = CSRF_MUTATING.has(method) ? getCsrfToken() : null;
   const headers = {
     "Content-Type": "application/json",
     ...(tabToken ? { "Authorization": `Bearer ${tabToken}` } : {}),
+    ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
     ...(options.headers || {})
   };
 
   const response = await fetch(path, {
     credentials: "include",
+    ...options,
     headers,
-    ...options
   });
 
   // Salva token novo no sessionStorage desta aba (isolamento por aba)
