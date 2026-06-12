@@ -46,6 +46,13 @@ if (openProfileModalBtn && profileModal) {
           : "<span style='color:var(--muted);'>sem papel definido</span>";
       }
 
+      // Contribuições do GitHub do próprio usuário
+      const ghContainer = document.querySelector("#profile-contributions");
+      const uid = user.id || state.currentUser?.id;
+      if (ghContainer && uid && typeof renderGithubContributions === "function") {
+        renderGithubContributions(uid, ghContainer, { canEdit: true });
+      }
+
     } catch (err) {
       console.error("Erro ao carregar perfil:", err);
     }

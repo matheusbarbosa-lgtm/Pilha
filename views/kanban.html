@@ -1,39 +1,61 @@
 
       <!-- ── Kanban ─────────────────────────────────────── -->
       <section id="kanban" class="view">
-        <!-- Barra de filtros Kanban -->
-        <div class="kanban-filters">
-          <div id="kanban-project-filter" style="display:flex;align-items:center;gap:0.65rem;">
-            <label style="font-size:0.8rem;font-weight:600;color:var(--text-2);margin:0;">Projeto:</label>
-            <select id="kanban-project-select" style="width:auto;flex:0 1 220px;"></select>
+
+        <!-- Toolbar / barra de filtros -->
+        <div class="kanban-toolbar">
+          <div class="kanban-toolbar-group kanban-toolbar-project">
+            <span class="kanban-field-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+            </span>
+            <select id="kanban-project-select" class="kanban-select kanban-select-project" aria-label="Projeto"></select>
           </div>
-          <input id="kanban-search" type="text" placeholder="Buscar tarefa..." style="flex:1;max-width:220px;" />
-          <select id="kanban-filter-assignee" style="max-width:160px;">
+
+          <div class="kanban-toolbar-group kanban-search-group">
+            <span class="kanban-field-icon" aria-hidden="true">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+            </span>
+            <input id="kanban-search" type="text" class="kanban-search" placeholder="Buscar tarefa..." />
+          </div>
+
+          <select id="kanban-filter-assignee" class="kanban-select" aria-label="Responsável">
             <option value="">Todos os responsáveis</option>
           </select>
-          <select id="kanban-filter-status" style="max-width:160px;">
+          <select id="kanban-filter-status" class="kanban-select" aria-label="Status">
             <option value="">Todos os status</option>
             <option value="nao_iniciado">Não iniciado</option>
             <option value="em_progresso">Em progresso</option>
             <option value="concluido">Concluído</option>
           </select>
-          <select id="kanban-filter-priority" style="max-width:160px;">
+          <select id="kanban-filter-priority" class="kanban-select" aria-label="Prioridade">
             <option value="">Todas as prioridades</option>
             <option value="urgente">Urgente</option>
             <option value="alta">Alta</option>
             <option value="normal">Normal</option>
             <option value="baixa">Baixa</option>
           </select>
+
+          <button id="kanban-clear-filters" class="kanban-clear-btn" type="button" title="Limpar filtros">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            Limpar
+          </button>
+
+          <button id="kanban-toggle-personal" class="kanban-toggle-personal" type="button" title="Minhas tarefas">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+            Minhas tarefas
+          </button>
         </div>
+
         <div class="kanban-wrapper">
           <!-- Sidebar pessoal -->
-          <div class="kanban-personal">
+          <aside class="kanban-personal" id="kanban-personal-panel">
             <h4>Minhas tarefas</h4>
             <div id="personal-tasks-list"></div>
-          </div>
+          </aside>
+
           <!-- Quadro principal -->
           <div class="kanban-board-area">
-            <div id="kanban-board" class="kanban-board" style="--kanban-cols:3"></div>
+            <div id="kanban-board" class="kanban-board"></div>
           </div>
         </div>
       </section>

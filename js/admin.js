@@ -58,9 +58,9 @@ document.querySelector("#create-professor-form")?.addEventListener("submit", asy
 // ── Exportar Turma ────────────────────────────────────────
 document.getElementById("btn-export-turma")?.addEventListener("click", () => {
   const select = document.getElementById("export-turma-select");
-  const turma = select?.value?.trim();
-  if (!turma) { alert("Selecione uma turma para exportar."); return; }
-  window.location = `/api/export/grading/turma/${encodeURIComponent(turma)}`;
+  const turmaId = Number(select?.value);
+  if (!turmaId) { alert("Selecione uma turma para exportar."); return; }
+  window.location = `/api/export/grading/turma/${turmaId}`;
 });
 
 // ── SUPER ADM ─────────────────────────────────────────────

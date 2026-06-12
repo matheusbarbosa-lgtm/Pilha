@@ -52,5 +52,33 @@
     }
   });
 
+  // Notificação genérica (tarefa movida, comentário, etc.)
+  socket.on("notification", ({ type, message, link }) => {
+    // Toast simples
+    const toast = document.createElement("div");
+    toast.className = "pilha-toast";
+    toast.textContent = message;
+    toast.style.cssText = [
+      "position:fixed","bottom:1.5rem","right:1.5rem","z-index:99999",
+      "background:var(--primary,#1565C0)","color:#fff",
+      "padding:.65rem 1.1rem","border-radius:8px",
+      "font-size:.85rem","font-weight:500",
+      "box-shadow:0 4px 16px rgba(0,0,0,.18)",
+      "pointer-events:none","opacity:0",
+      "transition:opacity .2s"
+    ].join(";");
+    document.body.appendChild(toast);
+    requestAnimationFrame(() => { toast.style.opacity = "1"; });
+    setTimeout(() => {
+      toast.style.opacity = "0";
+      setTimeout(() => toast.remove(), 250);
+    }, 3500);
+
+    // Adicionar ao sininho sem recarregar página
+    if (typeof window.pilhaNotifAddNew === "function") {
+      window.pilhaNotifAddNew({ type, message, link, is_read: 0, created_at: new Date().toISOString() });
+    }
+  });
+
   window._pilhaSocket = socket;
 })();

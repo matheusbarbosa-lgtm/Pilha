@@ -36,10 +36,30 @@ function renderCalendar(year, month) {
       const td = new Date(t.dueDate + "T00:00:00");
       return td.getFullYear() === year && td.getMonth() === month && td.getDate() === d;
     });
-    const titleAttr = tasksToday.length ? `title="${tasksToday.map((t) => escapeHtml(t.title)).join(", ")}"` : "";
-    cells += `<div class="calendar-day${isToday ? " today" : ""}${hasDeadline ? " has-deadline" : ""}" ${titleAttr}>${d}${hasDeadline ? `<span class="cal-dot"></span>` : ""}</div>`;
+    const projDeadline = state.projects.some((p) => {
+      if (!p.deadline) return false;
+      const pd = new Date(p.deadline + "T00:00:00");
+      return pd.getFullYear() === year && pd.getMonth() === month && pd.getDate() === d;
+    });
+    const taskChips = tasksToday.slice(0, 2).map((t) => {
+      const pr = (typeof priorityMeta === "function") ? priorityMeta(t.priority) : { color: "#2563eb" };
+      return `<span class="cal-task" data-open-task="${t.id}" title="${escapeHtml(t.title)}" style="--c:${pr.color}">${escapeHtml(t.title.length > 16 ? t.title.slice(0, 15) + "…" : t.title)}</span>`;
+    }).join("");
+    const moreChip = tasksToday.length > 2 ? `<span class="cal-task-more">+${tasksToday.length - 2} tarefa(s)</span>` : "";
+    cells += `<div class="calendar-day${isToday ? " today" : ""}${hasDeadline ? " has-deadline" : ""}">`
+      + `<span class="cal-daynum">${d}${projDeadline ? ` <span class="cal-dot" title="Prazo do projeto"></span>` : ""}</span>`
+      + taskChips + moreChip + `</div>`;
   }
   gridEl.innerHTML = cells;
+
+  // clique numa tarefa do calendário abre os detalhes (uma vez)
+  if (!gridEl._taskClickWired) {
+    gridEl._taskClickWired = true;
+    gridEl.addEventListener("click", (e) => {
+      const el = e.target.closest("[data-open-task]");
+      if (el && typeof openTaskDetail === "function") openTaskDetail(Number(el.dataset.openTask));
+    });
+  }
 }
 
 // Wire up calendar nav buttons once on load
@@ -57,54 +77,82 @@ function renderCalendar(year, month) {
 })();
 
 function renderDashboardMiniKanban() {
+  const ns = (s) => (typeof normStatus === "function") ? normStatus(s) : s;
   const cols = [
-    { key: "todo", elId: "dash-col-backlog" },
-    { key: "doing", elId: "dash-col-doing" },
-    { key: "done", elId: "dash-col-done" }
+    { key: "nao_iniciado", elId: "dash-col-backlog" },
+    { key: "em_progresso", elId: "dash-col-doing" },
+    { key: "concluido", elId: "dash-col-done" }
   ];
 
   cols.forEach(({ key, elId }) => {
     const el = document.querySelector(`#${elId}`);
     if (!el) return;
-    const colTasks = state.tasks.filter((t) => t.status === key || (key === "todo" && t.status === "backlog")).slice(0, 4);
-    el.innerHTML = colTasks.map((t) => `
-      <div class="dash-task urgency-${t.urgency || "medium"}" data-open-task="${t.id}" title="${escapeHtml(t.title)}">
-        <span>${escapeHtml(t.title)}</span>
-        <small>${escapeHtml(projectById(t.projectId)?.name || "")}</small>
-      </div>
-    `).join("") || `<div class="dash-task-empty">—</div>`;
-
-    el.addEventListener("click", (e) => {
-      const item = e.target.closest("[data-open-task]");
-      if (item) openTaskDetail(Number(item.dataset.openTask));
-    });
+    // TODAS as tarefas do kanban (sem subtarefas), de forma reduzida
+    const colTasks = state.tasks.filter((t) => !t.parentTaskId && ns(t.status) === key);
+    el.innerHTML = colTasks.map((t) => {
+      const tags = Array.isArray(t.tags) ? t.tags : [];
+      const tagsHtml = tags.slice(0, 3).map((tg) => {
+        const name = typeof tg === "string" ? tg : (tg && tg.name) || "";
+        const color = (tg && tg.color) || null;
+        return color
+          ? `<span class="dash-tag" style="background:${color}1f;color:${color};border-color:${color}55">${escapeHtml(name)}</span>`
+          : `<span class="dash-tag">${escapeHtml(name)}</span>`;
+      }).join("");
+      return `<div class="dash-task" data-open-task="${t.id}" title="${escapeHtml(t.title)}">`
+        + `<span class="dash-task-title">${escapeHtml(t.title)}</span>`
+        + (tagsHtml ? `<div class="dash-task-tags">${tagsHtml}</div>` : "")
+        + `</div>`;
+    }).join("") || `<div class="dash-task-empty">—</div>`;
   });
+
+  // clique nas tarefas → abre o detalhe (delegação, ligada uma vez)
+  const kb = document.querySelector("#dash-kanban");
+  if (kb && !kb._taskClickWired) {
+    kb._taskClickWired = true;
+    kb.addEventListener("click", (e) => {
+      const item = e.target.closest("[data-open-task]");
+      if (item && typeof openTaskDetail === "function") openTaskDetail(Number(item.dataset.openTask));
+    });
+  }
 }
 
-function renderActivityFeed() {
+async function renderActivityFeed() {
   const feedEl = document.querySelector("#activity-feed");
   if (!feedEl) return;
 
-  const upcoming = state.tasks
-    .filter((t) => t.status !== "done")
-    .sort((a, b) => a.dueDate.localeCompare(b.dueDate))
-    .slice(0, 6);
+  const statusLabel = (s) => ({
+    nao_iniciado: "Não iniciado", em_progresso: "Em progresso", concluido: "Concluído",
+    todo: "Não iniciado", backlog: "Não iniciado", doing: "Em progresso", review: "Em progresso", done: "Concluído",
+  })[s] || s;
+  const statusClass = (s) => {
+    const n = (typeof normStatus === "function") ? normStatus(s) : s;
+    return n === "concluido" ? "done" : n === "em_progresso" ? "doing" : "todo";
+  };
 
-  feedEl.innerHTML = upcoming.length
-    ? upcoming.map((t) => {
-        const daysLeft = Math.ceil((new Date(t.dueDate + "T00:00:00") - new Date()) / 86400000);
-        const overdue = daysLeft < 0;
+  let rows = [];
+  try { rows = await apiFetch("/api/activity/recent"); } catch (_) { rows = []; }
+
+  feedEl.innerHTML = rows.length
+    ? rows.map((r) => {
+        const dt = r.createdAt ? new Date(String(r.createdAt).replace(" ", "T") + "Z").toLocaleString("pt-BR", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
         return `
-          <div class="activity-item${overdue ? " overdue" : ""}">
-            <div class="activity-dot urgency-${t.urgency || "medium"}"></div>
+          <div class="activity-item activity-clickable" data-open-task="${r.taskId}" title="Abrir tarefa">
+            <div class="activity-dot status-${statusClass(r.newVal)}"></div>
             <div class="activity-info">
-              <span class="activity-title">${escapeHtml(t.title)}</span>
-              <small class="activity-meta">${escapeHtml(projectById(t.projectId)?.name || "")} · ${overdue ? `Atrasada ${Math.abs(daysLeft)}d` : daysLeft === 0 ? "Hoje!" : `${daysLeft}d`}</small>
+              <span class="activity-title">${escapeHtml(r.title)}</span>
+              <small class="activity-meta">${escapeHtml(r.userName || "Alguém")} moveu para <strong>${escapeHtml(statusLabel(r.newVal))}</strong> · ${dt}</small>
             </div>
-          </div>
-        `;
+          </div>`;
       }).join("")
-    : `<p class="activity-empty">Nenhuma tarefa pendente.</p>`;
+    : `<p class="activity-empty">Nenhuma movimentação recente.</p>`;
+
+  if (!feedEl._wired) {
+    feedEl._wired = true;
+    feedEl.addEventListener("click", (e) => {
+      const item = e.target.closest("[data-open-task]");
+      if (item && typeof openTaskDetail === "function") openTaskDetail(Number(item.dataset.openTask));
+    });
+  }
 }
 
 function renderStats() {
@@ -136,11 +184,19 @@ function renderStats() {
   }
 }
 
+// Progresso do projeto baseado no TEMPO: do início até a data final (prazo).
+// Começa em 0% na data de início e chega a 100% na data de entrega definida pelo professor.
 function projectProgress(projectId) {
-  const scoped = state.tasks.filter((t) => t.projectId === projectId);
-  if (!scoped.length) return 0;
-  const done = scoped.filter((t) => t.status === "done").length;
-  return Math.round((done / scoped.length) * 100);
+  const p = (typeof projectById === "function") ? projectById(projectId) : state.projects.find((x) => x.id === projectId);
+  if (!p || !p.deadline) return 0;
+  const end = new Date(`${p.deadline}T23:59:59`).getTime();
+  const start = p.startDate ? new Date(`${p.startDate}T00:00:00`).getTime() : NaN;
+  const now = Date.now();
+  if (isNaN(end)) return 0;
+  if (isNaN(start) || end <= start) return now >= end ? 100 : 0; // sem início válido
+  if (now <= start) return 0;
+  if (now >= end) return 100;
+  return Math.round(((now - start) / (end - start)) * 100);
 }
 
 function getCurrentUserScrumRoles() {

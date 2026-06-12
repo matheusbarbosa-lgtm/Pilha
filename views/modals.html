@@ -51,6 +51,7 @@
         </div>
       </div>
     </div>
+    <div id="profile-contributions" class="profile-contrib" style="padding:0 1.4rem;"></div>
     <small id="profile-error" class="login-error" style="padding:0 1.4rem 0.25rem;display:block;"></small>
     <small id="profile-success" class="ok-msg" style="padding:0 1.4rem 0.25rem;display:block;"></small>
     <menu>
@@ -68,12 +69,15 @@
       <label>Nome do projeto <input name="name" placeholder="ex: TCC — Análise de Dados" required /></label>
       <label>Descrição <input name="description" placeholder="Descreva o objetivo do projeto" /></label>
       <label>Disciplina / Matéria <input name="discipline" placeholder="ex: Engenharia de Software" /></label>
+      <label>Turma <select name="turmaId" id="project-turma-select" required>
+        <option value="">Selecione a turma...</option>
+      </select></label>
       <label>Equipe / turma <input name="team" placeholder="ex: Turma B · 2025" required /></label>
       <label>Integrantes (separados por vírgula) <input name="members" placeholder="ex: Ana Silva, Bruno Costa" required /></label>
       <label>Data de início <input type="date" name="startDate" /></label>
       <label>Data final <input type="date" name="deadline" required /></label>
       <menu>
-        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" class="btn-secondary" data-close-dialog>Cancelar</button>
         <button class="btn-primary" value="default">Salvar projeto</button>
       </menu>
     </form>
@@ -105,7 +109,7 @@
       </div>
       <div id="task-custom-fields"></div>
       <menu>
-        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" class="btn-secondary" data-close-dialog>Cancelar</button>
         <button class="btn-primary" value="default">Salvar tarefa</button>
       </menu>
     </form>
@@ -128,26 +132,12 @@
       </label>
       <div id="edit-task-custom-fields"></div>
       <menu>
-        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" class="btn-secondary" data-close-dialog>Cancelar</button>
         <button class="btn-primary" value="default">Salvar alterações</button>
       </menu>
     </form>
   </dialog>
 
-  <!-- Sprint -->
-  <dialog id="sprint-modal">
-    <h3>Nova sprint</h3>
-    <form method="dialog" id="sprint-form">
-      <label>Nome <input name="name" placeholder="ex: Sprint 1 — MVP" required /></label>
-      <label>Objetivo <input name="goal" placeholder="O que será entregue?" required /></label>
-      <label>Data de início <input type="date" name="start" required /></label>
-      <label>Data de fim <input type="date" name="end" required /></label>
-      <menu>
-        <button value="cancel" class="btn-secondary">Cancelar</button>
-        <button class="btn-primary" value="default">Criar sprint</button>
-      </menu>
-    </form>
-  </dialog>
 
   <!-- Campo customizado -->
   <dialog id="custom-field-modal">
@@ -167,73 +157,126 @@
         Opções (separadas por vírgula) <input name="options" placeholder="ex: Fácil, Médio, Difícil" />
       </label>
       <menu>
-        <button value="cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" class="btn-secondary" data-close-dialog>Cancelar</button>
         <button class="btn-primary" value="default">Salvar campo</button>
       </menu>
     </form>
   </dialog>
 
 
-  <!-- Task Detail Modal (rich) -->
-  <dialog id="task-detail-modal">
-    <div class="task-detail-header">
-      <input class="task-detail-title" id="detail-title" type="text" />
-      <span class="urgency-badge" id="detail-urgency-badge">Média</span>
+  <!-- Task Detail Modal (estilo Trello — minimalista + chat grande) -->
+  <dialog id="task-detail-modal" class="task-modal-v2">
+    <!-- Cabeçalho -->
+    <div class="tdm-header">
+      <div class="tdm-header-titles">
+        <span class="tdm-status-chip" id="detail-status-chip"></span>
+        <input class="tdm-title" id="detail-title" type="text" placeholder="Título da tarefa" />
+        <div class="tdm-subtitle" id="tdm-project-label"></div>
+      </div>
+      <span class="urgency-badge" id="detail-urgency-badge">Normal</span>
+      <button class="tdm-close" id="detail-close-btn" type="button" title="Fechar" aria-label="Fechar">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+      </button>
     </div>
-    <div class="task-detail-body">
-      <!-- Main -->
-      <div class="task-detail-main">
+
+    <div class="tdm-body">
+      <!-- ESQUERDA: conteúdo (minimalista, ações nos botões) -->
+      <main class="tdm-main">
+        <!-- Barra de ações estilo Trello -->
+        <div class="tdm-actionbar">
+          <button type="button" class="tdm-action" data-task-action="labels">🏷️ Etiquetas</button>
+          <button type="button" class="tdm-action" data-task-action="dates">📅 Datas</button>
+          <button type="button" class="tdm-action" data-task-action="checklist">☑️ Check-list</button>
+          <button type="button" class="tdm-action" data-task-action="members">👤 Membros</button>
+          <button type="button" class="tdm-action" data-task-action="attachment">📎 Anexo</button>
+          <button type="button" class="tdm-action tdm-action-details" data-task-action="details">⚙️ Detalhes</button>
+        </div>
+
+        <!-- Detalhes (colapsável — "Mostrar detalhes") -->
+        <div class="detail-section tdm-details-panel hidden" id="tdm-details-panel">
+          <div class="tdm-details-grid">
+            <div class="side-field">
+              <label>Status</label>
+              <select id="detail-status">
+                <option value="nao_iniciado">⚪ Não iniciado</option>
+                <option value="em_progresso">🔵 Em progresso</option>
+                <option value="concluido">🟢 Concluído</option>
+              </select>
+            </div>
+            <div class="side-field">
+              <label>Prioridade</label>
+              <select id="detail-priority">
+                <option value="urgente">🔴 Urgente</option>
+                <option value="alta">🟠 Alta</option>
+                <option value="normal">🟡 Normal</option>
+                <option value="baixa">🟢 Baixa</option>
+              </select>
+            </div>
+            <div class="side-field">
+              <label>Responsável</label>
+              <select id="detail-assignee"></select>
+            </div>
+            <div class="side-field">
+              <label>Data de início</label>
+              <input type="date" id="detail-start-date" />
+            </div>
+            <div class="side-field">
+              <label>Data de entrega</label>
+              <input type="date" id="detail-due-date" />
+            </div>
+          </div>
+        </div>
 
         <!-- Descrição -->
         <div class="detail-section">
-          <div class="detail-section-label">Descrição / Requisitos</div>
+          <div class="detail-section-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="14" y2="18"/></svg>
+            Descrição
+          </div>
           <textarea id="detail-description" placeholder="Adicione uma descrição para esta tarefa..."></textarea>
         </div>
 
-        <!-- Checklist -->
-        <div class="detail-section">
-          <div class="checklist-header-row">
-            <span class="detail-section-label" style="margin:0">Checklists</span>
-            <div class="progress" style="flex:1;max-width:80px;height:5px"><span id="checklist-bar" style="width:0%"></span></div>
-            <span class="checklist-total-label" id="checklist-label">0/0</span>
-          </div>
-          <div id="checklist-groups"></div>
-          <button class="checklist-new-group-btn" id="checklist-add-group-btn" type="button">+ Criar checklist</button>
-        </div>
-
-        <!-- Tags -->
-        <div class="detail-section">
-          <div class="detail-section-label">Tags</div>
+        <!-- Etiquetas -->
+        <div class="detail-section" id="section-tags">
+          <div class="detail-section-label">Etiquetas</div>
           <div class="tags-display" id="tags-display"></div>
+          <div class="tag-color-palette" id="tag-color-palette"></div>
           <div class="tags-input-row" style="margin-top:0.5rem;">
-            <input type="text" id="tag-new-input" placeholder="#front, #docs..." />
+            <input type="text" id="tag-new-input" placeholder="Nome da etiqueta..." maxlength="30" />
             <button class="btn-secondary" id="tag-add-btn" type="button">Adicionar</button>
           </div>
         </div>
 
-        <!-- Subtarefas -->
-        <div class="detail-section">
-          <div class="detail-section-label">Subtarefas</div>
-          <div id="subtasks-list" class="subtasks-list"></div>
-          <div class="checklist-add">
-            <input type="text" id="subtask-new-input" placeholder="Nova subtarefa..." />
-            <button class="btn-secondary" id="subtask-add-btn" type="button">+ Adicionar</button>
+        <!-- GitHub -->
+        <div class="detail-section" id="section-github">
+          <div class="detail-section-label">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.2.8-.5v-1.7c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.3 1.2a11.5 11.5 0 0 1 6 0C17 4.6 18 4.9 18 4.9c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.6.8.5 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5z"/></svg>
+            GitHub
+          </div>
+          <div class="gh-row">
+            <input type="text" id="github-repo-input" placeholder="github.com/usuario/repositorio" maxlength="300" />
+            <a id="github-open-link" class="gh-open hidden" target="_blank" rel="noopener" title="Abrir repositório">↗</a>
+          </div>
+          <textarea id="github-note-input" placeholder="O que você está fazendo? Ex: alterei o HTML da tela de login, criei a rota de cadastro..." maxlength="2000"></textarea>
+          <div class="gh-actions">
+            <button class="btn-secondary" id="github-save-btn" type="button">Salvar GitHub</button>
           </div>
         </div>
 
-        <!-- Comentários -->
-        <div class="detail-section">
-          <div class="detail-section-label">Comentários</div>
-          <div class="comments-list" id="comments-list"></div>
-          <div class="comment-input-row">
-            <textarea id="comment-new-input" placeholder="Escreva um comentário..."></textarea>
-            <button class="btn-primary" id="comment-send-btn" type="button">Enviar</button>
+        <!-- Check-list -->
+        <div class="detail-section" id="section-checklist">
+          <div class="checklist-header-row">
+            <span class="detail-section-label" style="margin:0">Check-list</span>
+            <div class="progress" style="flex:1;max-width:120px;height:6px"><span id="checklist-bar" style="width:0%"></span></div>
+            <span class="checklist-total-label" id="checklist-label">0/0</span>
           </div>
+          <div id="checklist-groups"></div>
+          <button class="checklist-new-group-btn" id="checklist-add-group-btn" type="button">+ Adicionar check-list</button>
         </div>
 
         <!-- Anexos -->
-        <div class="detail-section">
-          <div class="detail-section-label">Anexos <small style="color:var(--muted);font-weight:400">(máx 300KB por arquivo)</small></div>
+        <div class="detail-section" id="section-attachments">
+          <div class="detail-section-label">Anexos <small style="color:var(--muted);font-weight:400">(máx 80MB por arquivo)</small></div>
           <div id="attachments-list" class="attachments-list"></div>
           <label class="btn-secondary attachment-upload-label" style="cursor:pointer;margin-top:.4rem;display:inline-block;">
             + Anexar arquivo
@@ -242,53 +285,36 @@
           <small id="attachment-error" class="login-error"></small>
         </div>
 
-        <!-- Histórico de alterações -->
-        <div class="detail-section">
-          <div class="detail-section-label" style="cursor:pointer;" id="audit-log-toggle">Histórico de alterações ▸</div>
-          <div id="audit-log-list" class="audit-log-list hidden"></div>
-        </div>
-      </div>
-
-      <!-- Side -->
-      <div class="task-detail-side">
-        <div class="side-field">
-          <label>Status</label>
-          <select id="detail-status">
-            <option value="nao_iniciado">⚪ Não iniciado</option>
-            <option value="em_progresso">🔵 Em progresso</option>
-            <option value="concluido">🟢 Concluído</option>
-          </select>
-        </div>
-        <div class="side-field">
-          <label>Prioridade</label>
-          <select id="detail-priority">
-            <option value="urgente">🔴 Urgente</option>
-            <option value="alta">🟠 Alta</option>
-            <option value="normal">🟡 Normal</option>
-            <option value="baixa">🟢 Baixa</option>
-          </select>
-        </div>
-        <div class="side-field">
-          <label>Responsável</label>
-          <select id="detail-assignee"></select>
-        </div>
-        <div class="side-field">
-          <label>Data de início</label>
-          <input type="date" id="detail-start-date" />
-        </div>
-        <div class="side-field">
-          <label>Vencimento</label>
-          <input type="date" id="detail-due-date" />
-        </div>
-        <div class="side-field">
-          <label>Pontos</label>
-          <input type="number" id="detail-points" min="1" max="13" />
-        </div>
-        <div style="display:flex;gap:0.5rem;flex-direction:column;margin-top:0.5rem;">
+        <div class="tdm-save-row">
           <button class="btn-primary" id="detail-save-btn" type="button">Salvar alterações</button>
-          <button class="btn-secondary" id="detail-close-btn" type="button">Fechar</button>
+          <button class="btn-secondary" id="detail-close-btn-2" type="button">Fechar</button>
         </div>
-      </div>
+      </main>
+
+      <!-- DIREITA: Comentários e atividade (painel grande estilo Trello) -->
+      <aside class="tdm-activity">
+        <div class="tdm-activity-head">
+          <h3>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Comentários e atividade
+          </h3>
+          <button type="button" class="tdm-details-toggle" id="toggle-details-btn">Mostrar detalhes</button>
+        </div>
+
+        <div class="tdm-compose">
+          <textarea id="comment-new-input" placeholder="Escrever um comentário..." rows="2"></textarea>
+          <button class="btn-primary tdm-compose-send" id="comment-send-btn" type="button">Enviar</button>
+        </div>
+
+        <div class="tdm-feed">
+          <div class="comments-list" id="comments-list"></div>
+          <div class="tdm-activity-block hidden" id="activity-block">
+            <div class="tdm-feed-label">Atividade · todas as alterações</div>
+            <div id="audit-log-list" class="audit-log-list"></div>
+          </div>
+          <span id="audit-log-toggle" class="hidden"></span>
+        </div>
+      </aside>
     </div>
     <input type="hidden" id="detail-task-id" />
     <input type="hidden" id="detail-project-id" />
@@ -344,6 +370,7 @@
       <div class="mp-section" id="mp-grad-row"></div>
       <div class="mp-section" id="mp-spec-row"></div>
       <div class="mp-section" id="mp-exp-row"></div>
+      <div class="mp-section" id="mp-contributions"></div>
     </div>
   </dialog>
 

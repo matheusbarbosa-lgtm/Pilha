@@ -19,13 +19,37 @@ async function openProjectDetail(projectId) {
 
     // Info
     const fmt = (d) => d ? new Date(d + "T00:00:00").toLocaleDateString("pt-BR", { day: "2-digit", month: "short", year: "numeric" }) : "";
+    const isProf = state.currentUser?.role === "professor" || state.currentUser?.isAdmin;
+    const deadlineHtml = isProf
+      ? `<div style="display:flex;align-items:center;gap:.5rem;flex-wrap:wrap;">
+           <span>📅 Prazo:</span>
+           <input type="date" id="pd-deadline-input" value="${p.deadline || ""}" style="border:1px solid var(--border);border-radius:var(--r);padding:.2rem .5rem;font-size:.82rem;" />
+           <button id="pd-deadline-save-btn" class="btn-primary btn-sm" style="font-size:.75rem;">Salvar</button>
+         </div>`
+      : (p.deadline ? `<span>📅 Prazo: <strong>${fmt(p.deadline)}</strong></span>` : "");
     const infoItems = [
       p.team     ? `<span>📚 Turma: <strong>${escapeHtml(p.team)}</strong></span>` : "",
       p.discipline ? `<span>📖 Disciplina: <strong>${escapeHtml(p.discipline)}</strong></span>` : "",
       p.startDate  ? `<span>🗓️ Início: <strong>${fmt(p.startDate)}</strong></span>` : "",
-      p.deadline   ? `<span>📅 Prazo: <strong>${fmt(p.deadline)}</strong></span>` : "",
+      deadlineHtml,
     ].filter(Boolean).join("");
     document.getElementById("pd-info").innerHTML = infoItems || "<span style='color:var(--muted)'>Sem informações adicionais.</span>";
+
+    // Listener do botão Salvar prazo (apenas professor/admin)
+    document.getElementById("pd-deadline-save-btn")?.addEventListener("click", async () => {
+      const input = document.getElementById("pd-deadline-input");
+      const newDeadline = input?.value;
+      if (!newDeadline) return;
+      try {
+        await apiFetch(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify({ deadline: newDeadline }) });
+        const proj = state.projects.find((x) => String(x.id) === String(projectId));
+        if (proj) proj.deadline = newDeadline;
+        if (typeof renderKanban === "function") renderKanban();
+        if (typeof renderStats === "function") renderStats();
+        input.style.borderColor = "var(--success, #22c55e)";
+        setTimeout(() => { if (input) input.style.borderColor = ""; }, 1500);
+      } catch (err) { alert(err.message); }
+    });
 
     document.getElementById("pd-title").textContent = p.name;
 
@@ -63,7 +87,7 @@ async function openProjectDetail(projectId) {
             <th style="padding:.3rem .5rem;">Status</th>
           </tr></thead>
           <tbody>${tasks.map((t) => `
-            <tr style="border-top:1px solid var(--border);">
+            <tr style="border-top:1px solid var(--border);cursor:pointer;" data-open-task="${t.id}">
               <td style="padding:.35rem .5rem;">${escapeHtml(t.title)}</td>
               <td style="padding:.35rem .5rem;">${escapeHtml(t.assignee)}</td>
               <td style="padding:.35rem .5rem;">${fmt(t.due_date)}</td>
@@ -72,9 +96,14 @@ async function openProjectDetail(projectId) {
           </tbody>
         </table>`
       : "<p style='color:var(--muted);font-size:.85rem;'>Nenhuma tarefa cadastrada.</p>";
+    // Tarefas clicáveis → abre modal de detalhe
+    document.getElementById("pd-tasks")?.addEventListener("click", (e) => {
+      const row = e.target.closest("[data-open-task]");
+      if (row && typeof openTaskDetail === "function") openTaskDetail(Number(row.dataset.openTask));
+    });
 
     // Botões TAP / PI — visíveis apenas se docs liberados (alunos) ou sempre (prof/admin)
-    const isProf = state.currentUser?.role === "professor" || state.currentUser?.isAdmin;
+    // isProf já declarado acima nesta mesma função
     const docBtnsEl = document.getElementById("pd-doc-btns");
     if (docBtnsEl) docBtnsEl.style.display = (isProf || p.docsUnlocked) ? "flex" : "none";
 
@@ -305,6 +334,17 @@ async function openMemberProfile(name) {
     set("mp-grad-row", u.graduations ? `<span class="mp-label">Graduações:</span> ${escapeHtml(u.graduations)}` : "");
     set("mp-spec-row", u.specialty ? `<span class="mp-label">Especialidades:</span> ${escapeHtml(u.specialty)}` : "");
     set("mp-exp-row", u.experience_years > 0 ? `<span class="mp-label">Experiência:</span> ${u.experience_years} anos` : "");
+
+    // Contribuições do GitHub (professor/admin/o próprio podem ver/editar o login)
+    const ghContainer = document.getElementById("mp-contributions");
+    if (ghContainer) {
+      if (u.id && typeof renderGithubContributions === "function") {
+        const canEdit = state.currentUser?.role === "professor" || state.currentUser?.isAdmin || u.name === state.currentUser?.name;
+        renderGithubContributions(u.id, ghContainer, { canEdit });
+      } else {
+        ghContainer.innerHTML = "";
+      }
+    }
 
     modal.showModal();
   } catch (err) { console.error(err); }
@@ -548,6 +588,7 @@ function renderEquipes(searchTerm = "", roleFilter = "all") {
             ${turmaStr ? `<span class="group-meta-pill">📚 ${escapeHtml(turmaStr)}${periodoStr ? " · " + escapeHtml(periodoStr) : ""}</span>` : ""}
             ${p.discipline ? `<span class="group-meta-pill">📖 ${escapeHtml(p.discipline)}</span>` : ""}
             ${startFormatted ? `<span class="group-meta-pill">🗓️ ${escapeHtml(startFormatted)}${deadlineFormatted ? " → " + escapeHtml(deadlineFormatted) : ""}</span>` : deadlineFormatted ? `<span class="group-meta-pill">🗓️ até ${escapeHtml(deadlineFormatted)}</span>` : ""}
+            ${isProf ? `<span class="group-meta-pill gp-deadline-pill">📅 Entrega: <input type="date" class="gp-deadline-input" data-project-id="${p.id}" value="${p.deadline || ""}" title="Data final do projeto (somente professor)" /></span>` : ""}
           </div>
           ${descEditHtml}
         </div>
@@ -637,12 +678,18 @@ function renderEquipes(searchTerm = "", roleFilter = "all") {
     btn.addEventListener("click", async () => {
       const type = btn.dataset.releaseType;
       const projectId = btn.dataset.projectId;
-      // Busca turma_id via projeto (members → turma do primeiro aluno)
+      // Usa turma_id direto do projeto (campo enviado pelo backend via FK)
       const proj = state.projects.find((x) => String(x.id) === String(projectId));
-      const memberName = proj?.memberProfiles?.[0]?.name;
-      const memberUser = memberName ? _allUsers.find((u) => u.name === memberName) : null;
-      const turmaId = memberUser?.turmaId || memberUser?.turma_id;
-      if (!turmaId) { alert("Não foi possível identificar a turma do projeto."); return; }
+      let turmaId = proj?.turma_id || null;
+      // Fallback: buscar via memberProfiles somente se turma_id não disponível
+      if (!turmaId) {
+        for (const mp of (proj?.memberProfiles || [])) {
+          const u = _allUsers.find((x) => x.name === mp.name);
+          const tid = u?.turmaId || u?.turma_id;
+          if (tid) { turmaId = tid; break; }
+        }
+      }
+      if (!turmaId) { alert("Não foi possível identificar a turma do projeto. Verifique se o projeto está vinculado a uma turma."); return; }
       const isReleased = btn.classList.contains("released");
       try {
         if (isReleased) {
@@ -654,6 +701,23 @@ function renderEquipes(searchTerm = "", roleFilter = "all") {
           btn.classList.add("released");
           btn.title = "Liberado";
         }
+      } catch (err) { alert(err.message); }
+    });
+  });
+
+  // ── Professor edita a data final do projeto ──────────────
+  alunoGroupsEl.querySelectorAll(".gp-deadline-input").forEach((input) => {
+    input.addEventListener("change", async () => {
+      const projectId = input.dataset.projectId;
+      const deadline = input.value;
+      if (!deadline) return;
+      try {
+        await apiFetch(`/api/projects/${projectId}`, { method: "PATCH", body: JSON.stringify({ deadline }) });
+        const p = state.projects.find((x) => String(x.id) === String(projectId));
+        if (p) p.deadline = deadline;
+        input.style.outline = "2px solid #16a34a";
+        setTimeout(() => { input.style.outline = ""; }, 1200);
+        if (typeof renderAll === "function") renderAll(); // atualiza barra de progresso etc.
       } catch (err) { alert(err.message); }
     });
   });
@@ -746,8 +810,10 @@ function renderScrumKanban() {
   const projectSel = document.querySelector("#scrum-project-select");
   if (!kanbanEl || !projectSel) return;
 
-  // populate project select
+  // populate project select — PRESERVA a seleção atual (senão volta sempre pro 1º)
+  const _cur = projectSel.value;
   projectSel.innerHTML = state.projects.map((p) => `<option value="${p.id}">${escapeHtml(p.name)}</option>`).join("");
+  if (_cur && state.projects.find((p) => String(p.id) === _cur)) projectSel.value = _cur;
 
   const projectId = Number(projectSel.value) || state.projects[0]?.id;
   if (!projectId) { kanbanEl.innerHTML = `<p style="color:var(--muted)">Nenhum projeto disponível.</p>`; return; }

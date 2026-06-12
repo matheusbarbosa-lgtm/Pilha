@@ -39,7 +39,7 @@ async function renderAvaliacao() {
     for (const ind of evalData.individual) {
       const pid = String(ind.project_id);
       if (!individualByProject[pid]) individualByProject[pid] = {};
-      individualByProject[pid][ind.member_name] = ind.score;
+      individualByProject[pid][ind.member_name] = ind;
     }
     for (const meta of evalData.meta) {
       metaByProject[String(meta.project_id)] = meta;
@@ -54,7 +54,7 @@ async function renderAvaliacao() {
       const pid = String(proj.id);
       const planActs = activitiesByProject[pid]?.planejamento || [];
       const devActs = activitiesByProject[pid]?.desenvolvimento || [];
-      const indMap = individualByProject[pid] || {};
+      const indMap = individualByProject[pid] || {}; // now stores full {score, observacao, ...} objects
       const meta = metaByProject[pid] || { entrega_score: 0, observacoes: "" };
       const members = (proj.memberProfiles || []).map(m => m.name);
 
@@ -95,8 +95,11 @@ async function renderAvaliacao() {
         : members.map((memberName, mIdx) => {
           const planMemberTotal = planActs.reduce((s, a) => s + (actScoreMap[String(a.id)]?.[memberName] ?? 0), 0);
           const devMemberTotal = devActs.reduce((s, a) => s + (actScoreMap[String(a.id)]?.[memberName] ?? 0), 0);
-          const individualScore = Number(indMap[memberName] || 0);
-          const notaFinal = planMemberTotal + devMemberTotal + Number(meta.entrega_score || 0) + individualScore;
+          const indRecord = indMap[memberName] || {};
+          const individualScore = Number(indRecord.score || 0);
+          const indObservacao = indRecord.observacao || "";
+          const entregaScore = Number(indRecord.entrega_score || 0);
+          const notaFinal = planMemberTotal + devMemberTotal + entregaScore + individualScore;
 
           const planScoreCells = planActs.map(act => {
             const val = actScoreMap[String(act.id)]?.[memberName] ?? 0;
@@ -120,12 +123,12 @@ async function renderAvaliacao() {
             </td>`;
           }).join("");
 
-          const entregaCell = mIdx === 0
-            ? `<td class="eval-score-cell" rowspan="${members.length}">
-                <input type="number" class="eval-entrega-input" data-pid="${pid}"
-                       value="${Number(meta.entrega_score || 0)}" min="0" max="7" step="0.5" />
-               </td>`
-            : "";
+          const entregaCell = `
+            <td class="eval-score-cell">
+              <input type="number" class="eval-entrega-input"
+                     data-pid="${pid}" data-member="${escapeHtml(memberName)}"
+                     value="${entregaScore}" min="0" max="7" step="0.5" />
+            </td>`;
 
           const memberPhoto = memberPhotos[memberName];
           const avatarHtml = memberPhoto
@@ -152,6 +155,12 @@ async function renderAvaliacao() {
                        value="${individualScore}" min="0" max="10" step="0.5" />
               </td>
               <td class="eval-nota" data-pid="${pid}" data-member="${escapeHtml(memberName)}">${notaFinal.toFixed(1)}</td>
+              <td class="eval-score-cell">
+                <input type="text" class="eval-obs-individual-input"
+                       data-pid="${pid}" data-member="${escapeHtml(memberName)}"
+                       value="${escapeHtml(indObservacao)}"
+                       placeholder="Obs..." style="width:120px;" />
+              </td>
             </tr>
           `;
         }).join("");
@@ -177,6 +186,7 @@ async function renderAvaliacao() {
                   <th rowspan="2" class="eval-th-entrega">ENTREGA<br><small>7 PTS</small></th>
                   <th rowspan="2" class="eval-th-indiv">INDIVIDUAL</th>
                   <th rowspan="2" class="eval-th-nota">NOTA<br>FINAL</th>
+                  <th rowspan="2" class="eval-th-obs">OBS</th>
                 </tr>
                 <tr class="eval-thead-acts">
                   ${planActHeaders || '<th class="eval-act-th eval-act-empty">—</th>'}
@@ -214,12 +224,14 @@ async function renderAvaliacao() {
 
     attachAvaliacaoEvents(container);
 
-    // Populate turma dropdown from loaded projects
+    // Populate turma dropdown from /api/export/turmas (IDs, não texto)
     const turmaSelect = document.getElementById("export-turma-select");
     if (turmaSelect) {
-      const turmas = [...new Set(projects.map(p => (p.team || "").split(/\s*[-–]\s*/)[0].trim()).filter(Boolean))].sort();
-      turmaSelect.innerHTML = '<option value="">Selecione a turma...</option>' +
-        turmas.map(t => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
+      try {
+        const turmasList = await apiFetch("/api/export/turmas");
+        turmaSelect.innerHTML = '<option value="">Selecione a turma...</option>' +
+          turmasList.map(t => `<option value="${t.id}">${escapeHtml(t.label)}</option>`).join("");
+      } catch (_) { /* mantém vazio se falhar */ }
     }
   } catch (err) {
     container.innerHTML = `<p style="padding:1rem;color:var(--danger)">Erro ao carregar: ${escapeHtml(err.message)}</p>`;
@@ -230,11 +242,10 @@ function updateProjectCalculations(pid, container) {
   const block = container.querySelector(`.eval-project-block[data-pid="${pid}"]`);
   if (!block) return;
 
-  const entregaInput = block.querySelector('.eval-entrega-input');
-  const entregaScore = parseFloat(entregaInput?.value) || 0;
-
-  // Recalcular por linha (cada linha = um membro)
+  // Recalcular por linha (cada linha = um membro, cada um com sua entrega)
   block.querySelectorAll('tbody tr').forEach(row => {
+    const entregaInput = row.querySelector('.eval-entrega-input');
+    const entregaScore = parseFloat(entregaInput?.value) || 0;
     let planRowTotal = 0;
     row.querySelectorAll('.eval-score-input[data-section="planejamento"]').forEach(inp => {
       planRowTotal += parseFloat(inp.value) || 0;
@@ -289,9 +300,13 @@ function attachAvaliacaoEvents(container) {
     });
     input.addEventListener("blur", async () => {
       const pid = input.dataset.pid;
+      const memberName = input.dataset.member;
       const score = Math.min(7, Math.max(0, parseFloat(input.value) || 0));
       try {
-        await apiFetch(`/api/eval/${pid}/meta`, { method: "PATCH", body: JSON.stringify({ entrega_score: score }) });
+        await apiFetch(`/api/eval/${pid}/individual`, {
+          method: "PATCH",
+          body: JSON.stringify({ member_name: memberName, entrega_score: score })
+        });
         updateProjectCalculations(pid, container);
       } catch (err) { console.error(err); }
     });
@@ -322,6 +337,24 @@ function attachAvaliacaoEvents(container) {
           await apiFetch(`/api/eval/${pid}/meta`, { method: "PATCH", body: JSON.stringify({ observacoes: textarea.value }) });
         } catch (err) { console.error(err); }
       }, 1000);
+    });
+  });
+
+  // Observação individual por aluno — salva via PATCH /api/eval/:pid/individual
+  container.querySelectorAll(".eval-obs-individual-input").forEach(input => {
+    let _timer = null;
+    input.addEventListener("input", () => {
+      clearTimeout(_timer);
+      _timer = setTimeout(async () => {
+        const pid = input.dataset.pid;
+        const memberName = input.dataset.member;
+        try {
+          await apiFetch(`/api/eval/${pid}/individual`, {
+            method: "PATCH",
+            body: JSON.stringify({ member_name: memberName, observacao: input.value })
+          });
+        } catch (err) { console.error("Erro ao salvar observação individual:", err); }
+      }, 800);
     });
   });
 
