@@ -397,6 +397,8 @@ nav { padding: 0.3rem 0.6rem; display: grid; gap: 0.1rem; }
 .btn-primary {
   border: none; color: #fff; background: var(--primary);
   box-shadow: 0 1px 4px rgba(var(--primary-rgb),0.35); font-weight: 600;
+  justify-content: center; /* centraliza horizontalmente */
+  align-items: center;     /* centraliza verticalmente */
 }
 .btn-primary:hover { background: var(--primary-hover); box-shadow: 0 3px 10px rgba(var(--primary-rgb),0.4); }
 .btn-secondary { border: 1px solid var(--line); background: var(--surface); color: var(--text-2); }
