@@ -40,5 +40,8 @@ build/
 tmp/
 .cache/
 
+# Ferramentas locais extraidas fora do projeto
+Nova pasta/
+
 # Docker — dados locais
 docker-data/
